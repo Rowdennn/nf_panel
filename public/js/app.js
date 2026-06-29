@@ -36,62 +36,6 @@
     misc:     { label: 'Divers',     hue: 285 },
   };
 
-  const raw = [
-    ['bread', 'Pain', 'food'], ['corn', 'Maïs', 'food'], ['apple', 'Pomme', 'food'], ['raw_meat', 'Viande crue', 'food'],
-    ['cooked_meat', 'Viande cuite', 'food'], ['cheese', 'Fromage', 'food'], ['biscuit', 'Biscuit', 'food'], ['canned_beans', 'Haricots en boîte', 'food'],
-    ['water', 'Eau', 'drink'], ['coffee', 'Café', 'drink'], ['milk', 'Lait', 'drink'],
-    ['whiskey', 'Whisky', 'alcohol'], ['beer', 'Bière', 'alcohol'], ['wine', 'Vin', 'alcohol'], ['moonshine', 'Tord-boyaux', 'alcohol'],
-    ['weapon_revolver_cattleman', 'Revolver Cattleman', 'weapon'], ['weapon_revolver_schofield', 'Revolver Schofield', 'weapon'],
-    ['weapon_repeater_winchester', 'Carabine Winchester', 'weapon'], ['weapon_rifle_springfield', 'Fusil Springfield', 'weapon'],
-    ['weapon_shotgun_doublebarrel', 'Fusil à deux canons', 'weapon'], ['weapon_melee_knife', 'Couteau', 'weapon'], ['weapon_bow', 'Arc', 'weapon'], ['weapon_lasso', 'Lasso', 'weapon'],
-    ['ammo_revolver', 'Munitions revolver', 'ammo'], ['ammo_rifle', 'Munitions de fusil', 'ammo'], ['ammo_shotgun', 'Cartouches', 'ammo'], ['ammo_arrow', 'Flèches', 'ammo'],
-    ['bandage', 'Bandage', 'medical'], ['health_tonic', 'Tonique de santé', 'medical'], ['medicine', 'Médicament', 'medical'], ['horse_medicine', 'Médicament cheval', 'medical'],
-    ['leather', 'Cuir', 'material'], ['iron_ore', 'Minerai de fer', 'material'], ['lumber', 'Bois', 'material'], ['flour', 'Farine', 'material'], ['coal', 'Charbon', 'material'], ['gold_bar', 'Lingot d’or', 'material'], ['cloth', 'Tissu', 'material'],
-    ['deer_pelt', 'Peau de cerf', 'animal'], ['feather', 'Plume', 'animal'], ['animal_fat', 'Graisse animale', 'animal'], ['bird_meat', 'Viande d’oiseau', 'animal'],
-    ['pocket_watch', 'Montre à gousset', 'misc'], ['lantern', 'Lanterne', 'misc'], ['fishing_rod', 'Canne à pêche', 'misc'], ['playing_cards', 'Cartes à jouer', 'misc'], ['treasure_map', 'Carte au trésor', 'misc'],
-  ];
-
-  function descFor(cat, label) {
-    const m = {
-      food: `${label} — denrée périssable consommée pour restaurer la faim.`,
-      drink: `${label} — boisson permettant d'étancher la soif.`,
-      alcohol: `${label} — spiritueux à consommer avec modération.`,
-      weapon: `${label} — arme entretenue, prête à l'emploi.`,
-      ammo: `${label} — munitions compatibles avec l'arme correspondante.`,
-      medical: `${label} — soigne les blessures et restaure la santé.`,
-      material: `${label} — matière première utilisée en artisanat.`,
-      animal: `${label} — ressource issue de la chasse, vendable au comptoir.`,
-      misc: `${label} — objet divers à usage varié.`,
-    };
-    return m[cat] || `${label}.`;
-  }
-
-  function buildItems() {
-    const usable = ['food', 'drink', 'alcohol', 'medical'];
-    const weightBy = { weapon: 2.4, ammo: 0.02, material: 0.6, food: 0.25, drink: 0.4, alcohol: 0.5, medical: 0.15, animal: 0.7, misc: 0.5 };
-    const limitBy = { weapon: 1, ammo: 500, material: 100, food: 20, drink: 20, alcohol: 12, medical: 10, animal: 50, misc: 10 };
-    const cats = Object.keys(catMeta);
-    return raw.map((r, i) => {
-      const [item, label, cat] = r;
-      const missing = i % 9 === 4;
-      return {
-        id: 1001 + i, item, label, cat,
-        type: cat === 'weapon' ? 'weapon' : 'item',
-        limit: limitBy[cat] != null ? limitBy[cat] : 50,
-        weight: +((weightBy[cat] != null ? weightBy[cat] : 0.5).toFixed(2)),
-        can_remove: 1,
-        usable: usable.includes(cat) ? 1 : 0,
-        useExpired: cat === 'food' ? 1 : 0,
-        groupId: cats.indexOf(cat) + 1,
-        degradation: cat === 'food' ? 3 + (i % 7) : cat === 'medical' ? 30 : 0,
-        desc: descFor(cat, label),
-        metadata: cat === 'weapon' ? '{ "durability": 100 }' : cat === 'food' ? '{ "freshness": 100 }' : '{}',
-        hasImage: !missing,
-        size: missing ? 0 : 9 + (i * 7) % 55,
-        dims: missing ? '—' : '512×512',
-      };
-    });
-  }
 
   // Modules (Grades retiré ; Inventaires renommé en Coffres)
   const moduleDef = [
@@ -103,9 +47,12 @@
 
   // État
   const state = {
-    items: buildItems(),
+    items: [],
     query: '', cat: 'all', onlyMissing: false, view: 'list', sort: 'recent',
     draft: null, dropActive: false, module: 'items', nav: 'gallery',
+    matches: {},        // { [item]: { candidates, selected } }
+    matchesLoading: false,
+    validated: {},      // { [item]: true } — validés manuellement
     settings: {
       format: 'png', dimensions: '512', maxWeight: '256',
       autoCompress: true, autoName: true, autoPurge: true,
@@ -203,17 +150,32 @@
     s.items.forEach((i) => { catCounts[i.cat] = (catCounts[i.cat] || 0) + 1; });
 
     const showGalleryTab = inItems && s.nav === 'gallery';
-    const showSettings = inItems && s.nav === 'settings';
-    const titles = { gallery: 'Liste des items', settings: 'Réglages CDN' };
+    const showQueueTab  = inItems && s.nav === 'queue';
+    const showSettings  = inItems && s.nav === 'settings';
+
+    // items de la file d'attente (sans image) enrichis des candidats
+    const queueItems = s.items
+      .filter((it) => !it.hasImage)
+      .filter((it) => !q || it.label.toLowerCase().includes(q) || it.item.toLowerCase().includes(q))
+      .map((it) => {
+        const m = s.matches[it.item] || { candidates: [], selected: null };
+        return Object.assign({}, it, decorate(it), {
+          candidates: m.candidates,
+          selected: m.selected,
+          validated: !!s.validated[it.item],
+        });
+      });
 
     return {
       q, inItems, total, missingCount, catCounts, items,
-      showGalleryTab, showSettings, showModuleSoon: !inItems,
-      galleryTitle: titles[s.nav] || 'Items',
+      showGalleryTab, showQueueTab, showSettings, showModuleSoon: !inItems,
       isEmpty: showGalleryTab && items.length === 0,
       showGrid: showGalleryTab && s.view === 'grid' && items.length > 0,
       showList: showGalleryTab && s.view === 'list' && items.length > 0,
       curMod: moduleDef.find((m) => m.key === s.module) || moduleDef[0],
+      queueItems,
+      matchesLoading: s.matchesLoading,
+      validatedCount: Object.keys(s.validated).length,
     };
   }
 
@@ -240,7 +202,7 @@
 
     let subTabsBlock = '';
     if (v.inItems) {
-      const navDef = [['gallery', 'Liste des items', String(v.missingCount)], ['settings', 'Réglages CDN', null]];
+      const navDef = [['gallery', 'Liste des items', null], ['queue', 'File d\'attente', String(v.missingCount)], ['settings', 'Réglages CDN', null]];
       const navBase = 'display:flex; align-items:center; gap:10px; width:100%; height:40px; padding:0 12px; border-radius:10px; border:none; cursor:pointer; font-size:14px; font-weight:600; transition:background .12s;';
       const subTabs = navDef.map(([key, label, badge]) => {
         const active = s.nav === key;
@@ -395,8 +357,8 @@
   }
 
   function listHTML(v) {
-    const head = `<div style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 80px 90px 90px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;"><span>Image</span><span>Item</span><span>Identifiant</span><span>Catégorie</span><span>Type</span><span>Poids</span><span>Statut</span></div>`;
-    const rows = v.items.map((it) => `<div class="list-row" data-act="openItem" data-id="${it.id}" style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 80px 90px 90px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05); cursor:pointer;">
+    const head = `<div style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;"><span>Image</span><span>Item</span><span>Identifiant</span><span>Catégorie</span><span>Type</span><span>Poids</span><span>Statut</span></div>`;
+    const rows = v.items.map((it) => `<div class="list-row" data-act="openItem" data-id="${it.id}" style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05); cursor:pointer;">
         <div style="${it.thumbStyle}"></div>
         <span style="font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</span>
         <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#a89f93; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.item)}</span>
@@ -514,7 +476,7 @@
     </div>`;
   }
 
-  function modalHTML() {
+  function modalHTML(animate) {
     const d = state.draft;
     if (!d) return '';
     const dec = decorate(d);
@@ -550,8 +512,10 @@
     const draftPath = `/items/${d.item || 'sans_nom'}.png`;
     const sizeText = d.hasImage ? `${d.size} Ko` : '— Ko';
 
-    return `<div data-act="closeModal" style="position:fixed; inset:0; background:rgba(8,6,4,0.66); backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; padding:32px; z-index:50; animation:fadeIn .14s ease;">
-      <div data-act="stop" style="width:100%; max-width:900px; max-height:90vh; background:#1a1712; border:1px solid rgba(236,231,223,0.1); border-radius:16px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 30px 80px rgba(0,0,0,0.6); animation:popIn .2s cubic-bezier(.2,.7,.3,1);">
+    const backdropAnim = animate ? 'animation:fadeIn .14s ease;' : '';
+    const modalAnim = animate ? 'animation:popIn .2s cubic-bezier(.2,.7,.3,1);' : '';
+    return `<div data-act="closeModal" style="position:fixed; inset:0; background:rgba(8,6,4,0.66); backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; padding:32px; z-index:50; ${backdropAnim}">
+      <div data-act="stop" style="width:100%; max-width:900px; max-height:90vh; background:#1a1712; border:1px solid rgba(236,231,223,0.1); border-radius:16px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 30px 80px rgba(0,0,0,0.6); ${modalAnim}">
         <div style="display:flex; align-items:center; gap:12px; padding:18px 22px; border-bottom:1px solid rgba(236,231,223,0.08);">
           <div>
             <div style="font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:${BX_LIGHT};">${esc(kicker)}</div>
@@ -600,15 +564,90 @@
     </div>`;
   }
 
+  function queueHTML(v) {
+    if (v.matchesLoading) {
+      return `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:80px 0; color:#756c60; gap:14px;">
+        <div style="font-size:15px; color:#a89f93;">Analyse des correspondances en cours…</div>
+        <div style="font-size:12px;">Comparaison de ${v.missingCount} items contre la bibliothèque d'images.</div>
+      </div>`;
+    }
+
+    const hasMatches = Object.keys(state.matches).length > 0;
+    if (!hasMatches) {
+      return `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:80px 0; gap:16px; text-align:center;">
+        <div style="font-size:15px; color:#a89f93;">Analysez les correspondances pour commencer.</div>
+        <button data-act="loadMatches" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${BX}; color:#ffe9e6; font-weight:700; font-size:13.5px; cursor:pointer;">
+          Lancer l'analyse (${v.missingCount} items)
+        </button>
+      </div>`;
+    }
+
+    if (!v.queueItems.length) {
+      return `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:80px 0; color:#756c60; text-align:center;">
+        <div style="font-size:15px; color:#a89f93;">Tous les items ont une image. 🎉</div>
+      </div>`;
+    }
+
+    const validatedCount = v.validatedCount;
+    const head = `<div style="display:grid; grid-template-columns:34px 1.2fr 1fr 1.8fr 80px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;">
+      <span></span><span>Item</span><span>Identifiant</span><span>Candidat proposé</span><span>Validé</span>
+    </div>`;
+
+    const rows = v.queueItems.map((it) => {
+      const scoreColor = !it.candidates.length ? '#756c60'
+        : it.candidates[0].score >= 0.9 ? GR_LIGHT
+        : it.candidates[0].score >= 0.7 ? AMBER
+        : '#cf6f6f';
+      const scoreText = it.candidates.length ? (it.candidates[0].score * 100).toFixed(0) + '%' : '—';
+
+      const opts = it.candidates.map((c) =>
+        `<option value="${esc(c.file)}" ${it.selected === c.file ? 'selected' : ''}>${esc(c.file)} (${(c.score*100).toFixed(0)}%)</option>`
+      ).join('');
+      const picker = it.candidates.length
+        ? `<div style="display:flex; align-items:center; gap:8px;">
+            <select data-act="selectMatch" data-item="${esc(it.item)}" style="flex:1; height:34px; padding:0 10px; border-radius:8px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:12px; outline:none; cursor:pointer;">${opts}</select>
+            <span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:${scoreColor}; flex-shrink:0;">${scoreText}</span>
+          </div>`
+        : `<span style="font-size:12px; color:#756c60;">Aucun candidat</span>`;
+
+      const checkbox = `<div data-act="toggleValidate" data-item="${esc(it.item)}" style="width:22px; height:22px; border-radius:6px; border:2px solid ${it.validated ? GR : 'rgba(236,231,223,0.2)'}; background:${it.validated ? GR : 'transparent'}; cursor:pointer; display:flex; align-items:center; justify-content:center; color:${ON_GR}; font-size:13px; flex-shrink:0;">${it.validated ? '✓' : ''}</div>`;
+
+      return `<div style="display:grid; grid-template-columns:34px 1.2fr 1fr 1.8fr 80px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05);">
+        ${checkbox}
+        <span style="font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</span>
+        <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#a89f93; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.item)}</span>
+        ${picker}
+        <div style="display:flex; align-items:center; justify-content:center;">${checkbox}</div>
+      </div>`;
+    }).join('');
+
+    const bulk = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+      <div>
+        <span style="font-size:18px; font-weight:700;">File d'attente</span>
+        <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#756c60; background:#211d16; border:1px solid rgba(236,231,223,0.07); padding:3px 9px; border-radius:7px; margin-left:10px;">${v.queueItems.length} items</span>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <span style="font-size:12px; color:#756c60;">${validatedCount} validé(s)</span>
+        <button data-act="validateAll" style="height:36px; padding:0 16px; border-radius:9px; border:1px solid rgba(236,231,223,0.12); background:#211d16; color:#ece7df; font-size:13px; font-weight:600; cursor:pointer;">Valider score ≥ 80%</button>
+        <button data-act="publishAll" style="height:36px; padding:0 16px; border-radius:9px; border:none; background:${GR}; color:${ON_GR}; font-size:13px; font-weight:700; cursor:pointer; opacity:${validatedCount ? 1 : 0.4};">Publier ${validatedCount} item(s) → R2</button>
+      </div>
+    </div>`;
+
+    return bulk + `<div style="border:1px solid rgba(236,231,223,0.08); border-radius:12px; overflow:hidden;">${head}${rows}</div>`;
+  }
+
   function contentHTML(v) {
     if (v.showModuleSoon) return moduleSoonHTML(v);
     if (v.showSettings) return settingsHTML();
+    if (v.showQueueTab) return queueHTML(v);
     let body = statsHTML() + toolbarHTML(v);
     if (v.isEmpty) body += emptyHTML();
     else if (v.showGrid) body += gridHTML(v);
     else if (v.showList) body += listHTML(v);
     return body;
   }
+
+  let _modalWasOpen = false;
 
   // Rendu + restauration du focus
   function captureFocus() {
@@ -631,13 +670,15 @@
   function render() {
     const cap = captureFocus();
     const v = computeVals();
+    const modalJustOpened = !!state.draft && !_modalWasOpen;
+    _modalWasOpen = !!state.draft;
     root.innerHTML = `<div style="display:flex; height:100vh; width:100%; overflow:hidden;">
       ${sidebarHTML(v)}
       <main style="flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden;">
         ${headerHTML(v)}
         <div style="flex:1; overflow-y:auto; padding:24px 24px 48px;">${contentHTML(v)}</div>
       </main>
-    </div>${modalHTML()}`;
+    </div>${modalHTML(modalJustOpened)}`;
     restoreFocus(cap);
   }
 
@@ -670,6 +711,22 @@
         break;
       case 'togSetting':
         state.settings = Object.assign({}, state.settings, { [key]: !state.settings[key] }); render(); break;
+      case 'loadMatches': loadMatches(); break;
+      case 'toggleValidate': {
+        const itKey = el.dataset.item;
+        const v2 = Object.assign({}, state.validated);
+        if (v2[itKey]) delete v2[itKey]; else v2[itKey] = true;
+        state.validated = v2; render(); break;
+      }
+      case 'validateAll': {
+        const v2 = Object.assign({}, state.validated);
+        state.items.filter((it) => !it.hasImage).forEach((it) => {
+          const m = state.matches[it.item];
+          if (m && m.candidates[0] && m.candidates[0].score >= 0.8) v2[it.item] = true;
+        });
+        state.validated = v2; render(); break;
+      }
+      case 'publishAll': setFlash('Upload R2 — disponible à l\'étape 3.'); break;
       case 'saveSettings': setFlash('Réglages enregistrés.'); break;
       case 'runScan': setFlash('Scan terminé · 54 items sans image · 3 orphelins détectés.'); break;
       case 'purgeCache': setFlash('Cache edge Cloudflare purgé sur tous les nœuds.'); break;
@@ -683,10 +740,15 @@
     const act = el.dataset.act;
     const key = el.dataset.key;
     const val = e.target.value;
-    if (act === 'query') { state.query = val; render(); }
+    if (act === 'selectMatch') {
+      const itKey = el.dataset.item;
+      state.matches = Object.assign({}, state.matches, { [itKey]: Object.assign({}, state.matches[itKey], { selected: val }) });
+      // pas de render — le select gère son propre état visuel
+    }
+    else if (act === 'query') { state.query = val; render(); }
     else if (act === 'sort') { state.sort = val; render(); }
     else if (act === 'setSetting') { state.settings = Object.assign({}, state.settings, { [key]: val }); render(); }
-    else if (act === 'setDraft' && state.draft) { state.draft = Object.assign({}, state.draft, { [key]: val }); render(); }
+    else if (act === 'setDraft' && state.draft) { state.draft = Object.assign({}, state.draft, { [key]: val }); }
   }
   root.addEventListener('input', onValueChange);
   root.addEventListener('change', onValueChange);
@@ -712,14 +774,29 @@
     dropImage();
   });
 
-  // Chargement des items réels (repli sur les mocks si DB indisponible)
   function loadItems() {
     fetch('/api/items')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((data) => { if (Array.isArray(data) && data.length) { state.items = data; render(); } })
+      .catch(() => {});
+  }
+
+  function loadMatches() {
+    if (state.matchesLoading) return;
+    state.matchesLoading = true;
+    render();
+    fetch('/api/match')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data) => {
-        if (Array.isArray(data) && data.length) { state.items = data; render(); }
+        const m = {};
+        data.forEach((row) => {
+          m[row.item] = { candidates: row.candidates, selected: row.candidates[0] ? row.candidates[0].file : null };
+        });
+        state.matches = m;
+        state.matchesLoading = false;
+        render();
       })
-      .catch(() => { /* DB non configurée / dev : on garde les données factices */ });
+      .catch(() => { state.matchesLoading = false; render(); });
   }
 
   // Go
