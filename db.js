@@ -30,7 +30,7 @@ function itemsTable() {
 }
 
 async function fetchItems() {
-  const sql = 'SELECT `item`, `label`, `limit`, `can_remove`, `type`, `usable`, `desc` FROM `' + itemsTable() + '`';
+  const sql = 'SELECT `item`, `label`, `limit`, `can_remove`, `type`, `usable`, `desc`, `weight`, `groupId`, `degradation`, `useExpired`, `metadata` FROM `' + itemsTable() + '`';
   const [rows] = await getPool().query(sql);
   return rows;
 }
