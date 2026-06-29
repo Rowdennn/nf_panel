@@ -4,6 +4,7 @@ const fs = require('fs');
 const express = require('express');
 const db = require('./db');
 const { match } = require('./matcher');
+const r2 = require('./r2');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -100,6 +101,31 @@ app.get('/api/match', async (_req, res) => {
     console.error('[/api/match]', e.code || e.message);
     res.status(500).json({ error: 'db_error', code: e.code || null });
   }
+});
+
+// Publie une liste d'items vers R2 : { items: [{ item, file }] }
+// file = nom du fichier source dans LIBRARY_PATH
+app.post('/api/publish', async (req, res) => {
+  if (!r2.isConfigured()) return res.status(503).json({ error: 'r2_not_configured' });
+  const list = req.body.items;
+  if (!Array.isArray(list) || !list.length) return res.status(400).json({ error: 'items_required' });
+
+  const libraryPath = process.env.LIBRARY_PATH;
+  const results = [];
+
+  for (const { item, file } of list) {
+    if (!item || !file) { results.push({ item, ok: false, error: 'missing_fields' }); continue; }
+    try {
+      const key = await r2.uploadItem(item, file, libraryPath);
+      results.push({ item, ok: true, key });
+    } catch (e) {
+      console.error('[/api/publish]', item, e.message);
+      results.push({ item, ok: false, error: e.message });
+    }
+  }
+
+  const failed = results.filter((r) => !r.ok);
+  res.status(failed.length && failed.length === results.length ? 500 : 200).json({ results, failed: failed.length });
 });
 
 app.listen(PORT, () => {

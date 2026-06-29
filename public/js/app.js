@@ -726,7 +726,27 @@
         });
         state.validated = v2; render(); break;
       }
-      case 'publishAll': setFlash('Upload R2 — disponible à l\'étape 3.'); break;
+      case 'publishAll': {
+        const toPublish = state.items
+          .filter((it) => !it.hasImage && state.validated[it.item])
+          .map((it) => ({ item: it.item, file: (state.matches[it.item] || {}).selected }))
+          .filter((x) => x.file);
+        if (!toPublish.length) break;
+        setFlash(`Publication de ${toPublish.length} item(s)…`);
+        fetch('/api/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: toPublish }) })
+          .then((r) => r.json())
+          .then((data) => {
+            const ok = data.results.filter((r) => r.ok).map((r) => r.item);
+            ok.forEach((item) => {
+              const idx = state.items.findIndex((i) => i.item === item);
+              if (idx >= 0) state.items[idx] = Object.assign({}, state.items[idx], { hasImage: true });
+              const v2 = Object.assign({}, state.validated); delete v2[item]; state.validated = v2;
+            });
+            setFlash(`${ok.length} image(s) publiée(s) sur R2.${data.failed ? ' ' + data.failed + ' erreur(s).' : ''}`);
+          })
+          .catch(() => setFlash('Erreur lors de la publication.'));
+        break;
+      }
       case 'saveSettings': setFlash('Réglages enregistrés.'); break;
       case 'runScan': setFlash('Scan terminé · 54 items sans image · 3 orphelins détectés.'); break;
       case 'purgeCache': setFlash('Cache edge Cloudflare purgé sur tous les nœuds.'); break;
