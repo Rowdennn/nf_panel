@@ -27,3 +27,7 @@ select { appearance: none; }
 .item-card:hover { background: #272219 !important; border-color: rgba(138,34,48,0.4) !important; transform: translateY(-3px); box-shadow: 0 12px 26px rgba(0,0,0,0.4); }
 .list-row { transition: background .12s; }
 .list-row:hover { background: #1f1b15 !important; }
+
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
