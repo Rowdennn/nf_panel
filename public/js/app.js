@@ -58,12 +58,6 @@
     r2Stats: null,
     cdnBase: '',
     publishing: false,
-    settings: {
-      format: 'png', dimensions: '512', maxWeight: '256',
-      autoCompress: true, autoName: true, autoPurge: true,
-      baseUrl: 'https://cdn.monserveur-rp.fr/items', folder: '/items/',
-      apiKey: 'r2_live_8f2c••••••••3f9a', fallback: '_missing.png',
-    },
     flash: null,
   };
   let flashTimer = null;
@@ -168,8 +162,7 @@
     s.items.forEach((i) => { catCounts[i.cat] = (catCounts[i.cat] || 0) + 1; });
 
     const showGalleryTab = inItems && s.nav === 'gallery';
-    const showQueueTab  = inItems && s.nav === 'queue';
-    const showSettings  = inItems && s.nav === 'settings';
+    const showQueueTab = inItems && s.nav === 'queue';
 
     // items de la file d'attente (sans image) enrichis des candidats
     const queueItems = s.items
@@ -192,7 +185,7 @@
 
     return {
       q, inItems, total, onlineCount, missingCount, catCounts, items,
-      showGalleryTab, showQueueTab, showSettings, showModuleSoon: !inItems,
+      showGalleryTab, showQueueTab, showModuleSoon: !inItems,
       isEmpty: showGalleryTab && items.length === 0,
       showGrid: showGalleryTab && s.view === 'grid' && items.length > 0,
       showList: showGalleryTab && s.view === 'list' && items.length > 0,
@@ -226,7 +219,7 @@
 
     let subTabsBlock = '';
     if (v.inItems) {
-      const navDef = [['gallery', 'Liste des items', null], ['queue', 'File d\'attente', String(v.missingCount)], ['settings', 'Réglages CDN', null]];
+      const navDef = [['gallery', 'Liste des items', null], ['queue', 'File d\'attente', String(v.missingCount)]];
       const navBase = 'display:flex; align-items:center; gap:10px; width:100%; height:40px; padding:0 12px; border-radius:10px; border:none; cursor:pointer; font-size:14px; font-weight:600; transition:background .12s;';
       const subTabs = navDef.map(([key, label, badge]) => {
         const active = s.nav === key;
@@ -268,21 +261,16 @@
     let storWidget = '';
     if (v.inItems) {
       const st = state.r2Stats;
-      const MAX_GB = 10;
       const usedBytes = st ? st.sizeBytes : 0;
-      const usedMb = (usedBytes / 1024 / 1024).toFixed(1);
-      const pct = st ? Math.min(100, (usedBytes / (MAX_GB * 1024 * 1024 * 1024)) * 100).toFixed(1) : 0;
+      const usedMb = (usedBytes / 1024 / 1024).toFixed(2);
       const fileCount = st ? st.count : '—';
-      const usedLabel = st ? `${usedMb} Mo` : '…';
-      const storBar = sty({ width: pct + '%', height: '100%', borderRadius: '4px', background: `linear-gradient(90deg,${BX},${BX_LIGHT})` });
       storWidget = `<div style="padding:14px; border-top:1px solid rgba(236,231,223,0.06);">
         <div style="background:#211d16; border:1px solid rgba(236,231,223,0.07); border-radius:11px; padding:13px 14px;">
-          <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:9px;">
+          <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:7px;">
             <span style="font-size:12px; color:#a89f93;">Stockage R2</span>
-            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#756c60;">${usedLabel} / ${MAX_GB} Go</span>
+            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#756c60;">${st ? usedMb + ' Mo' : '…'} / 10 Go</span>
           </div>
-          <div style="height:7px; border-radius:4px; background:#0f0d0a; overflow:hidden;"><div style="${storBar}"></div></div>
-          <div style="margin-top:9px; font-size:11px; color:#756c60;">${fileCount} fichiers · ${pct}%</div>
+          <div style="font-size:11px; color:#756c60;">${fileCount} fichiers</div>
         </div>
       </div>`;
     }
@@ -428,90 +416,7 @@
     </div>`;
   }
 
-  function settingsHTML() {
-    const s = state.settings;
-    const card = (icon, title, body) => `<div style="background:#1a1712; border:1px solid rgba(236,231,223,0.07); border-radius:14px; padding:20px 22px;">
-      <div style="display:flex; align-items:center; gap:10px; margin-bottom:18px;">
-        <div style="width:30px; height:30px; border-radius:8px; background:rgba(${BX_RGB},0.13); display:flex; align-items:center; justify-content:center; font-size:14px;">${icon}</div>
-        <div style="font-size:14.5px; font-weight:700;">${esc(title)}</div>
-      </div>${body}</div>`;
-    const lbl = (t) => `<label style="display:block; font-size:11.5px; font-weight:600; color:#a89f93; margin-bottom:6px;">${esc(t)}</label>`;
-    const inp = (key, opts) => {
-      opts = opts || {};
-      const mono = opts.mono ? "font-family:'JetBrains Mono',monospace;" : '';
-      const bg = opts.bg || '#211d16';
-      const color = opts.color || '#ece7df';
-      const type = opts.type || 'text';
-      return `<input id="set-${key}" data-act="setSetting" data-key="${key}" type="${type}" value="${esc(s[key])}" style="width:100%; height:38px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:${bg}; color:${color}; font-size:13.5px; ${mono} outline:none;" />`;
-    };
-    const sel = (key, options) => {
-      const opts = options.map(([val, t]) => `<option value="${val}" ${s[key] === val ? 'selected' : ''}>${esc(t)}</option>`).join('');
-      return `<select data-act="setSetting" data-key="${key}" style="width:100%; height:38px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${opts}</select>`;
-    };
-    const togRow = (key, title, desc) => `<div data-act="togSetting" data-key="${key}" style="display:flex; align-items:center; gap:12px; margin-top:9px; padding:11px 13px; border-radius:10px; background:#211d16; cursor:pointer;">
-      <div style="flex:1;"><div style="font-size:13px; font-weight:600;">${esc(title)}</div><div style="font-size:11.5px; color:#756c60; margin-top:2px;">${desc}</div></div>
-      ${toggleHTML(!!s[key])}
-    </div>`;
 
-    const uploadBody = `<div style="display:grid; grid-template-columns:1fr 1fr; gap:13px 14px;">
-        <div>${lbl('Format imposé')}${sel('format', [['png', 'PNG (transparence)'], ['webp', 'WebP (léger)']])}</div>
-        <div>${lbl('Dimensions cibles')}${sel('dimensions', [['256', '256 × 256'], ['512', '512 × 512'], ['1024', '1024 × 1024']])}</div>
-        <div style="grid-column:span 2;">${lbl('Poids maximum par image (Ko)')}${inp('maxWeight', { type: 'number', mono: true })}</div>
-      </div>
-      ${togRow('autoCompress', 'Compression automatique', 'Optimise chaque image au téléversement')}
-      ${togRow('autoName', 'Nommage calé sur l\'identifiant', 'Fichier renommé en <span style="font-family:\'JetBrains Mono\',monospace;">item.png</span> à l\'upload')}`;
-
-    const pathsBody = `<div style="display:flex; flex-direction:column; gap:13px;">
-        <div>${lbl('URL de base du CDN (R2)')}${inp('baseUrl', { mono: true })}</div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
-          <div>${lbl('Préfixe (bucket key)')}${inp('folder', { mono: true })}</div>
-          <div>${lbl('Image de secours')}${inp('fallback', { mono: true })}</div>
-        </div>
-        <div>${lbl('Token API R2')}${inp('apiKey', { mono: true, bg: '#16130f', color: GR_LIGHT })}<div style="font-size:11px; color:#756c60; margin-top:6px;">Autorise l'upload vers R2. Gardé côté serveur, jamais exposé au front.</div></div>
-      </div>`;
-
-    const cacheBody = `<div data-act="togSetting" data-key="autoPurge" style="display:flex; align-items:center; gap:12px; padding:11px 13px; border-radius:10px; background:#211d16; cursor:pointer; margin-bottom:13px;">
-        <div style="flex:1;"><div style="font-size:13px; font-weight:600;">Purge auto du cache edge</div><div style="font-size:11.5px; color:#756c60; margin-top:2px;">Après chaque remplacement d'image</div></div>
-        ${toggleHTML(!!s.autoPurge)}
-      </div>
-      <div style="display:flex; gap:10px;">
-        <button data-act="runScan" style="flex:1; height:40px; border-radius:10px; border:1px solid rgba(236,231,223,0.12); background:#211d16; color:#ece7df; font-weight:600; font-size:13px; cursor:pointer;">Scanner la base</button>
-        <button data-act="purgeCache" style="flex:1; height:40px; border-radius:10px; border:1px solid rgba(224,161,78,0.3); background:rgba(224,161,78,0.1); color:${AMBER}; font-weight:600; font-size:13px; cursor:pointer;">Purger le cache</button>
-      </div>
-      <div style="font-size:11.5px; color:#756c60; margin-top:12px; line-height:1.55;">Le scan compare la base aux objets présents sur R2 : il alimente la file d'attente (items sans image) et détecte les orphelins (images sans item).</div>`;
-
-    const roles = [
-      { role: 'Fondateur', access: 'Édition complète', color: GR_LIGHT },
-      { role: 'Staff / Dev', access: 'Édition complète', color: GR_LIGHT },
-      { role: 'Modérateur', access: 'Lecture seule', color: '#a89f93' },
-    ];
-    const rolesBody = `<div style="display:flex; flex-direction:column; gap:2px;">${roles.map((r) => `<div style="display:flex; align-items:center; gap:12px; padding:11px 4px; border-bottom:1px solid rgba(236,231,223,0.05);">
-        <span style="width:8px; height:8px; border-radius:50%; background:${r.color}; flex-shrink:0;"></span>
-        <span style="flex:1; font-size:13.5px; font-weight:600;">${esc(r.role)}</span>
-        <span style="font-size:12px; font-weight:600; color:${r.color};">${esc(r.access)}</span>
-      </div>`).join('')}</div>
-      <div style="font-size:11.5px; color:#756c60; margin-top:14px; line-height:1.55;">Définit qui peut éditer les items et téléverser des images. Synchronisé avec les groupes de votre serveur RedM.</div>`;
-
-    const flash = state.flash
-      ? `<div style="display:flex; align-items:center; gap:9px; font-size:13px; color:${GR_LIGHT}; background:rgba(${GR_RGB},0.1); border:1px solid rgba(${GR_RGB},0.25); padding:9px 14px; border-radius:10px; animation:fadeIn .2s ease;"><span style="font-size:14px;">✓</span> ${esc(state.flash)}</div>`
-      : '';
-
-    return `<div style="max-width:1080px;">
-      <h2 style="margin:0 0 4px; font-size:18px; font-weight:700; letter-spacing:-0.01em;">Réglages CDN</h2>
-      <p style="margin:0 0 22px; font-size:13.5px; color:#756c60; max-width:560px;">La plomberie du CDN Cloudflare R2 : règles d'upload, chemins d'accès, cache et permissions. Ces réglages s'appliquent à l'ensemble du catalogue.</p>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
-        ${card('⬆', 'Upload & formats', uploadBody)}
-        ${card('⛓', 'Chemins & accès', pathsBody)}
-        ${card('↻', 'Cache & maintenance', cacheBody)}
-        ${card('⚷', 'Accès administrateur', rolesBody)}
-      </div>
-      <div style="display:flex; align-items:center; gap:14px; margin-top:22px;">
-        ${flash}
-        <div style="flex:1;"></div>
-        <button data-act="saveSettings" style="height:42px; padding:0 24px; border-radius:11px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:14px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);">Enregistrer les réglages</button>
-      </div>
-    </div>`;
-  }
 
   function modalHTML(animate) {
     const d = state.draft;
@@ -676,7 +581,7 @@
           <span style="font-size:12px;color:#a89f93;">%</span>
         </div>
         <button data-act="validateAll" style="height:36px; padding:0 16px; border-radius:9px; border:1px solid rgba(236,231,223,0.12); background:#211d16; color:#ece7df; font-size:13px; font-weight:600; cursor:pointer;">Valider ≥ ${state.queueThreshold}%</button>
-        <button data-act="publishAll" style="height:36px; padding:0 16px; border-radius:9px; border:none; background:${GR}; color:${ON_GR}; font-size:13px; font-weight:700; cursor:pointer; opacity:${validatedCount ? 1 : 0.4};">Publier ${validatedCount} item(s) → R2</button>
+        <button data-act="publishAll" style="height:36px; padding:0 16px; border-radius:9px; border:none; background:${GR}; color:${ON_GR}; font-size:13px; font-weight:700; cursor:pointer; opacity:${validatedCount ? 1 : 0.4};">Publier ${validatedCount} item(s)</button>
       </div>
     </div>`;
 
@@ -685,7 +590,6 @@
 
   function contentHTML(v) {
     if (v.showModuleSoon) return moduleSoonHTML(v);
-    if (v.showSettings) return settingsHTML();
     if (v.showQueueTab) return queueHTML(v);
     let body = statsHTML(v) + toolbarHTML(v);
     if (v.isEmpty) body += emptyHTML();
@@ -767,8 +671,6 @@
       case 'togDraft':
         if (state.draft) { state.draft = Object.assign({}, state.draft, { [key]: +state.draft[key] ? 0 : 1 }); render(); }
         break;
-      case 'togSetting':
-        state.settings = Object.assign({}, state.settings, { [key]: !state.settings[key] }); render(); break;
       case 'loadMatches': loadMatches(); break;
       case 'toggleValidate': {
         const itKey = el.dataset.item;
@@ -807,9 +709,6 @@
           .catch(() => { state.publishing = false; setFlash('Erreur lors de la publication.'); });
         break;
       }
-      case 'saveSettings': setFlash('Réglages enregistrés.'); break;
-      case 'runScan': setFlash('Scan terminé · 54 items sans image · 3 orphelins détectés.'); break;
-      case 'purgeCache': setFlash('Cache edge Cloudflare purgé sur tous les nœuds.'); break;
       default: break;
     }
   });
@@ -829,7 +728,6 @@
     else if (act === 'queueSort') { state.queueSort = val; render(); }
     else if (act === 'query') { state.query = val; render(); }
     else if (act === 'sort') { state.sort = val; render(); }
-    else if (act === 'setSetting') { state.settings = Object.assign({}, state.settings, { [key]: val }); render(); }
     else if (act === 'setDraft' && state.draft) { state.draft = Object.assign({}, state.draft, { [key]: val }); }
   }
   root.addEventListener('input', onValueChange);
