@@ -1,0 +1,29 @@
+/* NFR Item CDN — base globale (porté du <style> de la maquette) */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: #14120f;
+  color: #ece7df;
+  font-family: 'Hanken Grotesk', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+#app { height: 100vh; }
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: #2e2820; border-radius: 7px; border: 3px solid #14120f; }
+::-webkit-scrollbar-thumb:hover { background: #3a332a; }
+::-webkit-scrollbar-track { background: transparent; }
+
+input::placeholder, textarea::placeholder { color: #756c60; }
+input, textarea, select, button { font-family: inherit; }
+textarea { resize: vertical; }
+select { appearance: none; }
+
+@keyframes popIn { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* hover states (la maquette utilisait style-hover, on le reproduit en CSS) */
+.item-card { transition: transform .14s, border-color .14s, box-shadow .14s; }
+.item-card:hover { background: #272219 !important; border-color: rgba(138,34,48,0.4) !important; transform: translateY(-3px); box-shadow: 0 12px 26px rgba(0,0,0,0.4); }
+.list-row { transition: background .12s; }
+.list-row:hover { background: #1f1b15 !important; }

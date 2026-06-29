@@ -1,0 +1,22 @@
+{
+  "name": "nfr-panel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Panel d'administration de New Frontier : items + CDN images, et autres modules (jobs, joueurs, coffres etc..)",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "mysql2": "^3.22.5"
+  },
+  "//dependencies_phase1": {
+    "mysql2": "lecture table items VORP",
+    "@aws-sdk/client-s3": "upload des images vers Cloudflare R2 (API S3)",
+    "dotenv": "config (creds R2, DB) hors du code"
+  }
+}
