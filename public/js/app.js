@@ -53,6 +53,11 @@
     matches: {},        // { [item]: { candidates, selected } }
     matchesLoading: false,
     validated: {},      // { [item]: true } — validés manuellement
+    queueSort: 'score_desc',
+    queueThreshold: 80,
+    r2Stats: null,
+    cdnBase: '',
+    publishing: false,
     settings: {
       format: 'png', dimensions: '512', maxWeight: '256',
       autoCompress: true, autoName: true, autoPurge: true,
@@ -72,13 +77,25 @@
   function decorate(it) {
     const hue = catMeta[it.cat] ? catMeta[it.cat].hue : 285;
     const a = `oklch(0.34 0.05 ${hue})`, b = `oklch(0.285 0.045 ${hue})`;
+    const imgUrl = it.hasImage && state.cdnBase
+      ? (state.cdnBase.replace(/\/$/, '') + '/items/' + encodeURIComponent(it.item) + '.png')
+      : null;
+    const imgBg = imgUrl
+      ? `position:absolute;inset:0;display:flex;align-items:flex-end;padding:10px;background-image:url('${imgUrl}');background-size:contain;background-position:center;background-repeat:no-repeat;background-color:#16130f;`
+      : `position:absolute;inset:0;display:flex;align-items:flex-end;padding:10px;background:repeating-linear-gradient(135deg,${a},${a} 11px,${b} 11px,${b} 22px);`;
+    const thumbBg = imgUrl
+      ? `background-image:url('${imgUrl}');background-size:contain;background-position:center;background-repeat:no-repeat;background-color:#16130f;`
+      : it.hasImage
+        ? `background:repeating-linear-gradient(135deg,${a},${a} 6px,${b} 6px,${b} 12px);`
+        : 'background:rgba(224,161,78,0.1);';
     return {
       hue,
       catLabel: catMeta[it.cat] ? catMeta[it.cat].label : 'Divers',
       fileName: `${it.item || 'sans_nom'}.png`,
+      imgUrl,
       noImage: !it.hasImage,
-      tileStyle: sty({ position: 'absolute', inset: 0, display: 'flex', alignItems: 'flex-end', padding: '10px', background: `repeating-linear-gradient(135deg, ${a}, ${a} 11px, ${b} 11px, ${b} 22px)` }),
-      thumbStyle: sty({ width: '40px', height: '40px', borderRadius: '8px', background: it.hasImage ? `repeating-linear-gradient(135deg, ${a}, ${a} 6px, ${b} 6px, ${b} 12px)` : 'rgba(224,161,78,0.1)', border: it.hasImage ? '1px solid rgba(236,231,223,0.08)' : '1.5px dashed rgba(224,161,78,0.5)' }),
+      tileStyle: imgBg,
+      thumbStyle: `width:40px;height:40px;border-radius:8px;${thumbBg}border:${it.hasImage ? '1px solid rgba(236,231,223,0.08)' : '1.5px dashed rgba(224,161,78,0.5)'};`,
       cornerStyle: sty({ position: 'absolute', top: '9px', left: '9px', fontSize: '10.5px', fontWeight: '600', color: `oklch(0.82 0.06 ${hue})`, background: `color-mix(in oklab, oklch(0.55 0.12 ${hue}) 24%, rgba(0,0,0,0.5))`, border: `1px solid color-mix(in oklab, oklch(0.6 0.12 ${hue}) 30%, transparent)`, padding: '2px 8px', borderRadius: '7px', backdropFilter: 'blur(2px)' }),
       badgePill: sty({ display: 'inline-block', fontSize: '11px', fontWeight: '600', color: `oklch(0.8 0.06 ${hue})`, background: `color-mix(in oklab, oklch(0.6 0.12 ${hue}) 16%, transparent)`, padding: '3px 9px', borderRadius: '7px', width: 'fit-content' }),
     };
@@ -145,7 +162,8 @@
     });
 
     const total = s.items.length;
-    const missingCount = s.items.filter((i) => !i.hasImage).length;
+    const onlineCount = s.items.filter((i) => i.hasImage).length;
+    const missingCount = total - onlineCount;
     const catCounts = {};
     s.items.forEach((i) => { catCounts[i.cat] = (catCounts[i.cat] || 0) + 1; });
 
@@ -163,11 +181,17 @@
           candidates: m.candidates,
           selected: m.selected,
           validated: !!s.validated[it.item],
+          topScore: m.candidates[0] ? m.candidates[0].score : -1,
         });
+      })
+      .sort((a, b) => {
+        if (s.queueSort === 'score_desc') return b.topScore - a.topScore;
+        if (s.queueSort === 'score_asc') return a.topScore - b.topScore;
+        return a.label.localeCompare(b.label);
       });
 
     return {
-      q, inItems, total, missingCount, catCounts, items,
+      q, inItems, total, onlineCount, missingCount, catCounts, items,
       showGalleryTab, showQueueTab, showSettings, showModuleSoon: !inItems,
       isEmpty: showGalleryTab && items.length === 0,
       showGrid: showGalleryTab && s.view === 'grid' && items.length > 0,
@@ -239,10 +263,29 @@
       catBlock = `<div style="padding:16px 18px 8px; font-size:10.5px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:#756c60;">Catégories</div>
         <div style="padding:0 12px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; flex:1;">${chips}</div>`;
     }
-    const spacer = v.showGalleryTab ? '' : '<div style="flex:1;"></div>';
+    const spacer = (v.showGalleryTab || v.showQueueTab) ? '' : '<div style="flex:1;"></div>';
 
-    const storPct = 9;
-    const storBar = sty({ width: storPct + '%', height: '100%', borderRadius: '4px', background: `linear-gradient(90deg,${BX},${BX_LIGHT})` });
+    let storWidget = '';
+    if (v.inItems) {
+      const st = state.r2Stats;
+      const MAX_GB = 10;
+      const usedBytes = st ? st.sizeBytes : 0;
+      const usedMb = (usedBytes / 1024 / 1024).toFixed(1);
+      const pct = st ? Math.min(100, (usedBytes / (MAX_GB * 1024 * 1024 * 1024)) * 100).toFixed(1) : 0;
+      const fileCount = st ? st.count : '—';
+      const usedLabel = st ? `${usedMb} Mo` : '…';
+      const storBar = sty({ width: pct + '%', height: '100%', borderRadius: '4px', background: `linear-gradient(90deg,${BX},${BX_LIGHT})` });
+      storWidget = `<div style="padding:14px; border-top:1px solid rgba(236,231,223,0.06);">
+        <div style="background:#211d16; border:1px solid rgba(236,231,223,0.07); border-radius:11px; padding:13px 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:9px;">
+            <span style="font-size:12px; color:#a89f93;">Stockage R2</span>
+            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#756c60;">${usedLabel} / ${MAX_GB} Go</span>
+          </div>
+          <div style="height:7px; border-radius:4px; background:#0f0d0a; overflow:hidden;"><div style="${storBar}"></div></div>
+          <div style="margin-top:9px; font-size:11px; color:#756c60;">${fileCount} fichiers · ${pct}%</div>
+        </div>
+      </div>`;
+    }
 
     return `<aside style="width:250px; flex-shrink:0; background:#1a1712; border-right:1px solid rgba(236,231,223,0.08); display:flex; flex-direction:column;">
       <div style="padding:20px 18px 16px; display:flex; align-items:center; gap:11px; border-bottom:1px solid rgba(236,231,223,0.06);">
@@ -259,16 +302,7 @@
       ${subTabsBlock}
       ${catBlock}
       ${spacer}
-      <div style="padding:14px; border-top:1px solid rgba(236,231,223,0.06);">
-        <div style="background:#211d16; border:1px solid rgba(236,231,223,0.07); border-radius:11px; padding:13px 14px;">
-          <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:9px;">
-            <span style="font-size:12px; color:#a89f93;">Stockage R2</span>
-            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#756c60;">184 Mo / 10 Go</span>
-          </div>
-          <div style="height:7px; border-radius:4px; background:#0f0d0a; overflow:hidden;"><div style="${storBar}"></div></div>
-          <div style="margin-top:9px; font-size:11px; color:#756c60;">1 193 fichiers · ${storPct}%</div>
-        </div>
-      </div>
+      ${storWidget}
     </aside>`;
   }
 
@@ -298,12 +332,12 @@
     </header>`;
   }
 
-  function statsHTML() {
-    const cards = [
-      { label: 'Items référencés', value: '1 247', unit: '', sub: '+18 cette semaine', color: '#ece7df' },
-      { label: 'Images en ligne', value: '1 193', unit: '95,7 %', sub: 'couverture du catalogue', color: GR_LIGHT },
-      { label: 'Images manquantes', value: '54', unit: 'à téléverser', sub: 'priorité file d’attente', color: AMBER },
-      { label: 'Stockage R2', value: '184', unit: 'Mo / 10 Go', sub: 'edge cache · egress gratuit', color: '#ece7df' },
+  function statsHTML(v) {
+    var pct = v.total ? ((v.onlineCount / v.total) * 100).toFixed(1) : '0.0';
+    var cards = [
+      { label: 'Items référencés', value: String(v.total), unit: '', sub: 'total en base', color: '#ece7df' },
+      { label: 'Images en ligne', value: String(v.onlineCount), unit: pct + ' %', sub: 'couverture du catalogue', color: GR_LIGHT },
+      { label: 'Images manquantes', value: String(v.missingCount), unit: 'à téléverser', sub: 'priorité file d\'attente', color: v.missingCount > 0 ? AMBER : GR_LIGHT },
     ];
     const cells = cards.map((st) => `<div style="background:#1a1712; border:1px solid rgba(236,231,223,0.07); border-radius:13px; padding:16px 18px;">
         <div style="font-size:12.5px; color:#a89f93; margin-bottom:10px;">${esc(st.label)}</div>
@@ -313,7 +347,7 @@
         </div>
         <div style="font-size:12px; color:#756c60; margin-top:7px;">${esc(st.sub)}</div>
       </div>`).join('');
-    return `<div style="display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:26px;">${cells}</div>`;
+    return `<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:26px;">${cells}</div>`;
   }
 
   function toolbarHTML(v) {
@@ -338,9 +372,12 @@
 
   function gridHTML(v) {
     const cards = v.items.map((it) => {
-      const imgArea = it.hasImage
-        ? `<div style="${it.tileStyle}"><span style="font-family:'JetBrains Mono',monospace; font-size:10.5px; color:rgba(236,231,223,0.62); background:rgba(0,0,0,0.34); padding:3px 7px; border-radius:6px; backdrop-filter:blur(2px);">${esc(it.fileName)}</span></div>`
-        : `<div style="position:absolute; inset:9px; border:1.5px dashed rgba(224,161,78,0.5); border-radius:9px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; background:rgba(224,161,78,0.05);"><span style="font-size:21px; opacity:.8;">⚠</span><span style="font-size:11px; color:${AMBER}; font-weight:600;">image manquante</span></div>`;
+      const imgArea = it.hasImage && it.imgUrl
+        ? `<div style="position:absolute;inset:0;background:#16130f;display:flex;align-items:center;justify-content:center;">
+            <img src="${it.imgUrl}" alt="${esc(it.label)}" style="width:100%;height:100%;object-fit:contain;display:block;" loading="lazy" />
+            <span style="position:absolute;bottom:8px;left:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(236,231,223,0.62);background:rgba(0,0,0,0.34);padding:3px 7px;border-radius:6px;backdrop-filter:blur(2px);">${esc(it.fileName)}</span>
+          </div>`
+        : `<div style="position:absolute;inset:9px;border:1.5px dashed rgba(224,161,78,0.5);border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:rgba(224,161,78,0.05);"><span style="font-size:21px;opacity:.8;">⚠</span><span style="font-size:11px;color:${AMBER};font-weight:600;">image manquante</span></div>`;
       return `<div class="item-card" data-act="openItem" data-id="${it.id}" style="background:#211d16; border:1px solid rgba(236,231,223,0.08); border-radius:12px; overflow:hidden; cursor:pointer;">
         <div style="position:relative; aspect-ratio:1/1; background:#16130f;">${imgArea}<span style="${it.cornerStyle}">${esc(it.catLabel)}</span></div>
         <div style="padding:11px 12px 12px;">
@@ -486,9 +523,9 @@
       border: state.dropActive ? `2px dashed ${GR}` : '2px dashed rgba(236,231,223,0.16)',
       background: state.dropActive ? `rgba(${GR_RGB},0.08)` : '#16130f', transition: 'border-color .15s, background .15s',
     });
-    const dropInner = d.hasImage
-      ? `<div style="${dec.tileStyle}"><span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:rgba(236,231,223,0.62); background:rgba(0,0,0,0.34); padding:3px 8px; border-radius:6px;">${esc(dec.fileName)}</span></div>`
-      : `<div style="display:flex; flex-direction:column; align-items:center; gap:9px; text-align:center; padding:20px;"><span style="font-size:26px; opacity:.7;">⬆</span><span style="font-size:13px; color:#a89f93;">Glissez une image ici</span><span style="font-size:11px; color:#756c60; font-family:'JetBrains Mono',monospace;">PNG · 512×512 · &lt; 256 Ko</span></div>`;
+    const dropInner = d.hasImage && dec.imgUrl
+      ? `<img src="${dec.imgUrl}" alt="${esc(d.label)}" style="width:100%;height:100%;object-fit:contain;display:block;background:#16130f;" loading="lazy" />`
+      : `<div style="display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center;padding:20px;"><span style="font-size:26px;opacity:.7;">⬆</span><span style="font-size:13px;color:#a89f93;">Glissez une image ici</span><span style="font-size:11px;color:#756c60;font-family:'JetBrains Mono',monospace;">PNG · 512×512 · &lt; 256 Ko</span></div>`;
 
     const fieldInp = (key, opts) => {
       opts = opts || {};
@@ -508,7 +545,7 @@
     }).join('');
 
     const kicker = d.id == null ? 'Nouvel item' : 'Édition';
-    const saveLabel = d.id == null ? 'Créer l’item' : 'Enregistrer';
+    const saveLabel = d.id == null ? "Créer l'item" : 'Enregistrer';
     const draftPath = `/items/${d.item || 'sans_nom'}.png`;
     const sizeText = d.hasImage ? `${d.size} Ko` : '— Ko';
 
@@ -589,8 +626,8 @@
     }
 
     const validatedCount = v.validatedCount;
-    const head = `<div style="display:grid; grid-template-columns:34px 1.2fr 1fr 1.8fr 80px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;">
-      <span></span><span>Item</span><span>Identifiant</span><span>Candidat proposé</span><span>Validé</span>
+    const head = `<div style="display:grid; grid-template-columns:1.2fr 1fr 1.8fr 44px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;">
+      <span>Item</span><span>Identifiant</span><span>Candidat proposé</span><span>✓</span>
     </div>`;
 
     const rows = v.queueItems.map((it) => {
@@ -612,8 +649,7 @@
 
       const checkbox = `<div data-act="toggleValidate" data-item="${esc(it.item)}" style="width:22px; height:22px; border-radius:6px; border:2px solid ${it.validated ? GR : 'rgba(236,231,223,0.2)'}; background:${it.validated ? GR : 'transparent'}; cursor:pointer; display:flex; align-items:center; justify-content:center; color:${ON_GR}; font-size:13px; flex-shrink:0;">${it.validated ? '✓' : ''}</div>`;
 
-      return `<div style="display:grid; grid-template-columns:34px 1.2fr 1fr 1.8fr 80px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05);">
-        ${checkbox}
+      return `<div style="display:grid; grid-template-columns:1.2fr 1fr 1.8fr 44px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05);">
         <span style="font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</span>
         <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#a89f93; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.item)}</span>
         ${picker}
@@ -621,14 +657,25 @@
       </div>`;
     }).join('');
 
+    const sortOpts = [['score_desc','Score ↓'], ['score_asc','Score ↑'], ['az','Nom (A → Z)']];
+    const sortSel = `<select data-act="queueSort" style="height:36px; padding:0 30px 0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16 url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22><path d=%22M1 3l4 4 4-4%22 stroke=%22%23a89f93%22 stroke-width=%221.5%22 fill=%22none%22/></svg>') no-repeat right 11px center; color:#ece7df; font-size:13px; cursor:pointer; outline:none;">
+      ${sortOpts.map(([val, lbl]) => `<option value="${val}" ${state.queueSort === val ? 'selected' : ''}>${esc(lbl)}</option>`).join('')}
+    </select>`;
+
     const bulk = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
-      <div>
+      <div style="display:flex; align-items:center; gap:10px;">
         <span style="font-size:18px; font-weight:700;">File d'attente</span>
-        <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#756c60; background:#211d16; border:1px solid rgba(236,231,223,0.07); padding:3px 9px; border-radius:7px; margin-left:10px;">${v.queueItems.length} items</span>
+        <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#756c60; background:#211d16; border:1px solid rgba(236,231,223,0.07); padding:3px 9px; border-radius:7px;">${v.queueItems.length} items</span>
+        ${sortSel}
       </div>
       <div style="display:flex; gap:10px; align-items:center;">
         <span style="font-size:12px; color:#756c60;">${validatedCount} validé(s)</span>
-        <button data-act="validateAll" style="height:36px; padding:0 16px; border-radius:9px; border:1px solid rgba(236,231,223,0.12); background:#211d16; color:#ece7df; font-size:13px; font-weight:600; cursor:pointer;">Valider score ≥ 80%</button>
+        <div style="display:flex;align-items:center;gap:8px;background:#211d16;border:1px solid rgba(236,231,223,0.12);border-radius:9px;padding:0 12px;height:36px;">
+          <span style="font-size:12px;color:#a89f93;">Seuil</span>
+          <input id="threshold-input" data-act="queueThreshold" type="number" min="1" max="100" value="${state.queueThreshold}" style="width:44px;background:transparent;border:none;color:#ece7df;font-size:13px;font-weight:600;font-family:'JetBrains Mono',monospace;outline:none;text-align:center;" />
+          <span style="font-size:12px;color:#a89f93;">%</span>
+        </div>
+        <button data-act="validateAll" style="height:36px; padding:0 16px; border-radius:9px; border:1px solid rgba(236,231,223,0.12); background:#211d16; color:#ece7df; font-size:13px; font-weight:600; cursor:pointer;">Valider ≥ ${state.queueThreshold}%</button>
         <button data-act="publishAll" style="height:36px; padding:0 16px; border-radius:9px; border:none; background:${GR}; color:${ON_GR}; font-size:13px; font-weight:700; cursor:pointer; opacity:${validatedCount ? 1 : 0.4};">Publier ${validatedCount} item(s) → R2</button>
       </div>
     </div>`;
@@ -640,7 +687,7 @@
     if (v.showModuleSoon) return moduleSoonHTML(v);
     if (v.showSettings) return settingsHTML();
     if (v.showQueueTab) return queueHTML(v);
-    let body = statsHTML() + toolbarHTML(v);
+    let body = statsHTML(v) + toolbarHTML(v);
     if (v.isEmpty) body += emptyHTML();
     else if (v.showGrid) body += gridHTML(v);
     else if (v.showList) body += listHTML(v);
@@ -669,17 +716,28 @@
 
   function render() {
     const cap = captureFocus();
+    const scrollEl = root.querySelector('[data-scroll]');
+    const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
     const v = computeVals();
     const modalJustOpened = !!state.draft && !_modalWasOpen;
     _modalWasOpen = !!state.draft;
-    root.innerHTML = `<div style="display:flex; height:100vh; width:100%; overflow:hidden;">
-      ${sidebarHTML(v)}
-      <main style="flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden;">
-        ${headerHTML(v)}
-        <div style="flex:1; overflow-y:auto; padding:24px 24px 48px;">${contentHTML(v)}</div>
-      </main>
-    </div>${modalHTML(modalJustOpened)}`;
+    const publishingOverlay = state.publishing ? `
+      <div style="position:fixed;inset:0;background:rgba(8,6,4,0.75);backdrop-filter:blur(4px);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;animation:fadeIn .15s ease;">
+        <div style="display:flex;gap:6px;">${[0,1,2].map((i) => `<div style="width:10px;height:10px;border-radius:50%;background:${BX_LIGHT};animation:bounce .9s ease-in-out ${i*0.18}s infinite alternate;"></div>`).join('')}</div>
+        <div style="font-size:15px;font-weight:600;color:#ece7df;letter-spacing:0.01em;">Publication en cours…</div>
+        <div style="font-size:12px;color:#756c60;">Envoi des images vers Cloudflare R2</div>
+      </div>` : '';
+    root.innerHTML = `<style>@keyframes bounce{from{transform:translateY(0)}to{transform:translateY(-10px)}}</style>
+      <div style="display:flex; height:100vh; width:100%; overflow:hidden;">
+        ${sidebarHTML(v)}
+        <main style="flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden;">
+          ${headerHTML(v)}
+          <div data-scroll style="flex:1; overflow-y:auto; padding:24px 24px 48px;">${contentHTML(v)}</div>
+        </main>
+      </div>${modalHTML(modalJustOpened)}${publishingOverlay}`;
     restoreFocus(cap);
+    const newScrollEl = root.querySelector('[data-scroll]');
+    if (newScrollEl && scrollTop) newScrollEl.scrollTop = scrollTop;
   }
 
   // Dispatch des événements
@@ -719,10 +777,11 @@
         state.validated = v2; render(); break;
       }
       case 'validateAll': {
+        const threshold = state.queueThreshold / 100;
         const v2 = Object.assign({}, state.validated);
         state.items.filter((it) => !it.hasImage).forEach((it) => {
           const m = state.matches[it.item];
-          if (m && m.candidates[0] && m.candidates[0].score >= 0.8) v2[it.item] = true;
+          if (m && m.candidates[0] && m.candidates[0].score >= threshold) v2[it.item] = true;
         });
         state.validated = v2; render(); break;
       }
@@ -732,7 +791,7 @@
           .map((it) => ({ item: it.item, file: (state.matches[it.item] || {}).selected }))
           .filter((x) => x.file);
         if (!toPublish.length) break;
-        setFlash(`Publication de ${toPublish.length} item(s)…`);
+        state.publishing = true; render();
         fetch('/api/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: toPublish }) })
           .then((r) => r.json())
           .then((data) => {
@@ -742,9 +801,10 @@
               if (idx >= 0) state.items[idx] = Object.assign({}, state.items[idx], { hasImage: true });
               const v2 = Object.assign({}, state.validated); delete v2[item]; state.validated = v2;
             });
+            state.publishing = false;
             setFlash(`${ok.length} image(s) publiée(s) sur R2.${data.failed ? ' ' + data.failed + ' erreur(s).' : ''}`);
           })
-          .catch(() => setFlash('Erreur lors de la publication.'));
+          .catch(() => { state.publishing = false; setFlash('Erreur lors de la publication.'); });
         break;
       }
       case 'saveSettings': setFlash('Réglages enregistrés.'); break;
@@ -765,6 +825,8 @@
       state.matches = Object.assign({}, state.matches, { [itKey]: Object.assign({}, state.matches[itKey], { selected: val }) });
       // pas de render — le select gère son propre état visuel
     }
+    else if (act === 'queueThreshold') { const n = parseInt(val, 10); if (n >= 1 && n <= 100) state.queueThreshold = n; }
+    else if (act === 'queueSort') { state.queueSort = val; render(); }
     else if (act === 'query') { state.query = val; render(); }
     else if (act === 'sort') { state.sort = val; render(); }
     else if (act === 'setSetting') { state.settings = Object.assign({}, state.settings, { [key]: val }); render(); }
@@ -772,6 +834,11 @@
   }
   root.addEventListener('input', onValueChange);
   root.addEventListener('change', onValueChange);
+
+  root.addEventListener('blur', (e) => {
+    const el = e.target.closest('[data-act="queueThreshold"]');
+    if (el) render();
+  }, true);
 
   // Drag & drop (zone de la modale)
   root.addEventListener('dragover', (e) => {
@@ -793,6 +860,20 @@
     e.preventDefault();
     dropImage();
   });
+
+  function loadConfig() {
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((d) => { if (d.cdnBase) { state.cdnBase = d.cdnBase; render(); } })
+      .catch(() => {});
+  }
+
+  function loadStats() {
+    fetch('/api/stats')
+      .then((r) => r.ok ? r.json() : Promise.reject())
+      .then((data) => { if (data.configured) { state.r2Stats = data; render(); } })
+      .catch(() => {});
+  }
 
   function loadItems() {
     fetch('/api/items')
@@ -821,5 +902,7 @@
 
   // Go
   render();
+  loadConfig();
   loadItems();
+  loadStats();
 })();

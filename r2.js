@@ -40,4 +40,21 @@ async function exists(itemName) {
   } catch { return false; }
 }
 
-module.exports = { isConfigured, uploadItem, exists };
+// Retourne un Map nom→sizeBytes des items présents dans R2.
+async function listItemNames() {
+  const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+  const c = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
+  const map = new Map();
+  let token;
+  do {
+    const r = await c.send(new ListObjectsV2Command({ Bucket: process.env.R2_BUCKET, Prefix: 'items/', ContinuationToken: token }));
+    (r.Contents || []).forEach((o) => {
+      const name = o.Key.replace(/^items\//, '').replace(/\.png$/i, '').toLowerCase();
+      if (name) map.set(name, o.Size || 0);
+    });
+    token = r.IsTruncated ? r.NextContinuationToken : null;
+  } while (token);
+  return map;
+}
+
+module.exports = { isConfigured, uploadItem, exists, listItemNames };

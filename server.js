@@ -6,6 +6,14 @@ const db = require('./db');
 const { match } = require('./matcher');
 const r2 = require('./r2');
 
+// Cache de la liste R2 — rafraîchi au démarrage et après chaque publish.
+let r2Cache = new Map(); // nom → sizeBytes
+function refreshR2Cache() {
+  if (!r2.isConfigured()) return;
+  r2.listItemNames().then((map) => { r2Cache = map; }).catch(() => {});
+}
+refreshR2Cache();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -13,6 +21,10 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, dbConfigured: db.isConfigured() }));
+
+app.get('/api/config', (_req, res) => res.json({
+  cdnBase: process.env.R2_PUBLIC_BASE_URL || '',
+}));
 
 // VORP ne stocke pas cat/poids/groupId/metadata : défauts + cat devinée du nom/type.
 function mapItem(row, i) {
@@ -46,11 +58,11 @@ app.get('/api/items', async (_req, res) => {
   if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
   try {
     const rows = await db.fetchItems();
-    const files = libraryFiles();
-    const fileSet = new Set(files.map((f) => f.toLowerCase()));
     res.json(rows.map((row, i) => {
+      const key = row.item.toLowerCase();
       const mapped = mapItem(row, i);
-      mapped.hasImage = fileSet.has(`${row.item}.png`.toLowerCase());
+      mapped.hasImage = r2Cache.has(key);
+      mapped.size = r2Cache.has(key) ? Math.round(r2Cache.get(key) / 1024) : 0;
       return mapped;
     }));
   } catch (e) {
@@ -78,11 +90,9 @@ app.get('/api/match', async (_req, res) => {
   try {
     const rows = await db.fetchItems();
     const files = libraryFiles();
-    const fileSet = new Set(files.map((f) => f.toLowerCase()));
 
     const result = rows.map((row) => {
-      const exactFile = `${row.item}.png`.toLowerCase();
-      const hasImage = fileSet.has(exactFile);
+      const hasImage = r2Cache.has(row.item.toLowerCase()); // dans /api/match
       if (hasImage) return { item: row.item, label: row.label, hasImage, candidates: [] };
       // tente le match sur le label ET sur le nom technique, garde le meilleur score
       const byLabel = match(row.label, files);
@@ -100,6 +110,24 @@ app.get('/api/match', async (_req, res) => {
   } catch (e) {
     console.error('[/api/match]', e.code || e.message);
     res.status(500).json({ error: 'db_error', code: e.code || null });
+  }
+});
+
+// Stats du bucket R2 (prefix items/)
+app.get('/api/stats', async (_req, res) => {
+  if (!r2.isConfigured()) return res.json({ configured: false });
+  try {
+    const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+    const c = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
+    let count = 0, size = 0, token;
+    do {
+      const r = await c.send(new ListObjectsV2Command({ Bucket: process.env.R2_BUCKET, Prefix: 'items/', ContinuationToken: token }));
+      (r.Contents || []).forEach((o) => { count++; size += o.Size || 0; });
+      token = r.IsTruncated ? r.NextContinuationToken : null;
+    } while (token);
+    res.json({ configured: true, count, sizeBytes: size });
+  } catch (e) {
+    res.status(500).json({ configured: true, error: e.message });
   }
 });
 
@@ -125,6 +153,7 @@ app.post('/api/publish', async (req, res) => {
   }
 
   const failed = results.filter((r) => !r.ok);
+  if (results.some((r) => r.ok)) refreshR2Cache();
   res.status(failed.length && failed.length === results.length ? 500 : 200).json({ results, failed: failed.length });
 });
 
