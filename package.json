@@ -12,6 +12,7 @@
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^4.19.2",
+    "mariadb": "^3.5.3",
     "mysql2": "^3.22.5"
   },
   "//dependencies_phase1": {
