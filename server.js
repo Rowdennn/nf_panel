@@ -28,6 +28,31 @@ if (isProd && !process.env.SESSION_SECRET) {
 }
 
 app.set('trust proxy', 1);
+
+// En-têtes de sécurité de base (pas de dépendance helmet pour un set aussi réduit).
+const r2PublicHost = (() => {
+  try { return new URL(process.env.R2_PUBLIC_BASE_URL || '').origin; } catch { return ''; }
+})();
+const csp = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  `img-src 'self' data: https://cdn.discordapp.com${r2PublicHost ? ' ' + r2PublicHost : ''}`,
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+app.use((_req, res, next) => {
+  res.setHeader('Content-Security-Policy', csp);
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
+  next();
+});
+
 app.use(express.json());
 app.use(cookieSession({
   name: 'nfr_session',
@@ -174,20 +199,12 @@ app.get('/api/library-image/:file', (req, res) => {
 // Upload d'une image externe vers la bibliothèque (LIBRARY_PATH). Le fichier
 // enregistré devient ensuite utilisable comme n'importe quel fichier de la
 // bibliothèque (publication via /api/publish au moment de l'enregistrement).
+// Mémoire (pas disque) : on valide le contenu réel avant d'écrire quoi que ce
+// soit sur LIBRARY_PATH — le mimetype multipart est déclaré par le client et
+// donc trivialement falsifiable, il ne sert qu'à un rejet rapide.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      const dir = process.env.LIBRARY_PATH;
-      if (!dir || !fs.existsSync(dir)) return cb(new Error('library_path_not_configured'));
-      cb(null, dir);
-    },
-    filename: (req, file, cb) => {
-      const safeBase = path.basename(file.originalname, path.extname(file.originalname))
-        .replace(/[^a-zA-Z0-9_-]/g, '_')
-        .slice(0, 60) || 'upload';
-      cb(null, `${safeBase}_${Date.now()}.png`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
     if (file.mimetype !== 'image/png') return cb(new Error('invalid_file_type'));
     cb(null, true);
@@ -204,7 +221,17 @@ app.post('/api/upload', requireWrite, (req, res) => {
       return res.status(400).json({ error: code });
     }
     if (!req.file) return res.status(400).json({ error: 'file_required' });
-    res.json({ file: req.file.filename });
+    if (!PNG_SIGNATURE.equals(req.file.buffer.subarray(0, 8))) {
+      return res.status(400).json({ error: 'invalid_file_type' });
+    }
+    const dir = process.env.LIBRARY_PATH;
+    if (!dir || !fs.existsSync(dir)) return res.status(503).json({ error: 'library_path_not_configured' });
+    const safeBase = path.basename(req.file.originalname, path.extname(req.file.originalname))
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 60) || 'upload';
+    const filename = `${safeBase}_${Date.now()}.png`;
+    fs.writeFileSync(path.join(dir, filename), req.file.buffer);
+    res.json({ file: filename });
   });
 });
 
