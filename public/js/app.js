@@ -22,6 +22,7 @@
   const GR_RGB = '16,185,129';
   const ON_GR = '#04140e';         // texte sur bouton vert
   const AMBER = '#e0a14e';
+  const PICKER_CHUNK = 120; // lot d'images chargées par scroll dans la banque d'images
 
   // Données (catégories)
   const catMeta = {
@@ -50,16 +51,23 @@
     items: [],
     query: '', cat: 'all', onlyMissing: false, view: 'list', sort: 'recent',
     draft: null, dropActive: false, module: 'items', nav: 'gallery',
-    matches: {},        // { [item]: { candidates, selected } }
-    matchesLoading: false,
-    validated: {},      // { [item]: true } — validés manuellement
-    queueSort: 'score_desc',
-    queueThreshold: 80,
+    libraryFiles: [],
+    libraryLoading: false,
+    libraryError: null,
+    pickerOpen: false,
+    pickerQuery: '',
+    pickerSelectedFile: null,
+    pickerVisibleCount: 120, // rendu progressif — évite 3000+ cartes DOM d'un coup
     r2Stats: null,
     cdnBase: '',
     publishing: false,
+    uploading: false,
     flash: null,
+    authChecked: false,
+    user: null,
+    access: null, // 'full' | 'readonly' | null
   };
+  function canWrite() { return state.access === 'full'; }
   let flashTimer = null;
   function setFlash(msg) {
     state.flash = msg;
@@ -72,7 +80,7 @@
     const hue = catMeta[it.cat] ? catMeta[it.cat].hue : 285;
     const a = `oklch(0.34 0.05 ${hue})`, b = `oklch(0.285 0.045 ${hue})`;
     const imgUrl = it.hasImage && state.cdnBase
-      ? (state.cdnBase.replace(/\/$/, '') + '/items/' + encodeURIComponent(it.item) + '.png')
+      ? (state.cdnBase.replace(/\/$/, '') + '/items/' + encodeURIComponent(it.item) + '.png' + (it.updatedAt ? '?v=' + it.updatedAt : ''))
       : null;
     const imgBg = imgUrl
       ? `position:absolute;inset:0;display:flex;align-items:flex-end;padding:10px;background-image:url('${imgUrl}');background-size:contain;background-position:center;background-repeat:no-repeat;background-color:#16130f;`
@@ -105,13 +113,11 @@
   }
   function openNew() {
     state.dropActive = false;
-    state.draft = { id: null, item: '', label: '', cat: 'misc', type: 'item', limit: 1, weight: 0.5, can_remove: 1, usable: 0, useExpired: 0, groupId: 9, degradation: 0, desc: '', metadata: '{}', hasImage: false, size: 0, dims: '—' };
+    state.draft = { id: null, item: '', label: '', cat: 'misc', type: 'item', limit: 1, weight: 0.5, can_remove: 1, usable: 0, useExpired: 0, groupId: 9, degradation: 0, desc: '', metadata: '{}', hasImage: false, size: 0 };
     render();
   }
   function closeModal() { state.draft = null; render(); }
-  function saveDraft() {
-    const d = state.draft;
-    if (!d) return;
+  function finalizeDraft(d) {
     const items = state.items.slice();
     if (d.id == null) {
       const nid = items.reduce((m, i) => Math.max(m, i.id), 1000) + 1;
@@ -122,13 +128,56 @@
     }
     state.items = items;
     state.draft = null;
+    state.publishing = false;
     render();
   }
-  function dropImage() {
-    if (!state.draft) return;
-    state.draft = Object.assign({}, state.draft, { hasImage: true, size: 12 + Math.floor(Math.random() * 42), dims: '512×512' });
+  function saveDraft() {
+    const d = state.draft;
+    if (!d) return;
+    if (!d.pendingFile) { finalizeDraft(d); return; }
+    if (!d.item) { setFlash("Renseigne l'identifiant (item) avant d'enregistrer."); return; }
+    state.publishing = true;
+    render();
+    fetch('/api/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [{ item: d.item, file: d.pendingFile }] }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        const ok = data.results && data.results.some((r) => r.ok);
+        if (!ok) { state.publishing = false; setFlash('Publication impossible.'); render(); return; }
+        finalizeDraft(Object.assign({}, d, { hasImage: true, pendingFile: null }));
+        setFlash('Image publiée sur R2.');
+        loadStats();
+        loadItems(); // récupère hasImage/size/updatedAt à jour sans recharger la page
+      })
+      .catch(() => { state.publishing = false; setFlash('Erreur lors de la publication.'); render(); });
+  }
+  function uploadAndAttach(file) {
+    if (!state.draft || !file) return;
+    if (file.type !== 'image/png') { setFlash('Seuls les fichiers PNG sont acceptés.'); return; }
+    state.uploading = true;
     state.dropActive = false;
     render();
+    const fd = new FormData();
+    fd.append('image', file);
+    fetch('/api/upload', { method: 'POST', body: fd })
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        state.uploading = false;
+        if (!ok || !data.file) {
+          const msg = data.error === 'invalid_file_type' ? 'Seuls les fichiers PNG sont acceptés.'
+            : data.error === 'file_too_large' ? 'Fichier trop volumineux (max 8 Mo).'
+            : "Échec de l'upload.";
+          setFlash(msg);
+          render();
+          return;
+        }
+        if (state.draft) state.draft = Object.assign({}, state.draft, { pendingFile: data.file, hasImage: true, size: Math.round(file.size / 1024) });
+        render();
+      })
+      .catch(() => { state.uploading = false; setFlash("Échec de l'upload."); render(); });
   }
 
   // Calcul des valeurs de rendu
@@ -161,38 +210,21 @@
     const catCounts = {};
     s.items.forEach((i) => { catCounts[i.cat] = (catCounts[i.cat] || 0) + 1; });
 
-    const showGalleryTab = inItems && s.nav === 'gallery';
-    const showQueueTab = inItems && s.nav === 'queue';
+    const showGalleryTab = inItems;
 
-    // items de la file d'attente (sans image) enrichis des candidats
-    const queueItems = s.items
-      .filter((it) => !it.hasImage)
-      .filter((it) => !q || it.label.toLowerCase().includes(q) || it.item.toLowerCase().includes(q))
-      .map((it) => {
-        const m = s.matches[it.item] || { candidates: [], selected: null };
-        return Object.assign({}, it, decorate(it), {
-          candidates: m.candidates,
-          selected: m.selected,
-          validated: !!s.validated[it.item],
-          topScore: m.candidates[0] ? m.candidates[0].score : -1,
-        });
-      })
-      .sort((a, b) => {
-        if (s.queueSort === 'score_desc') return b.topScore - a.topScore;
-        if (s.queueSort === 'score_asc') return a.topScore - b.topScore;
-        return a.label.localeCompare(b.label);
-      });
+    const pq = state.pickerQuery.trim().toLowerCase();
+    const pickerFiles = s.libraryFiles
+      .filter((file) => !pq || file.toLowerCase().includes(pq))
+      .sort((a, b) => a.localeCompare(b));
 
     return {
       q, inItems, total, onlineCount, missingCount, catCounts, items,
-      showGalleryTab, showQueueTab, showModuleSoon: !inItems,
+      showGalleryTab, showModuleSoon: !inItems,
       isEmpty: showGalleryTab && items.length === 0,
       showGrid: showGalleryTab && s.view === 'grid' && items.length > 0,
       showList: showGalleryTab && s.view === 'list' && items.length > 0,
       curMod: moduleDef.find((m) => m.key === s.module) || moduleDef[0],
-      queueItems,
-      matchesLoading: s.matchesLoading,
-      validatedCount: Object.keys(s.validated).length,
+      pickerFiles,
     };
   }
 
@@ -217,26 +249,6 @@
       </button>`;
     }).join('');
 
-    let subTabsBlock = '';
-    if (v.inItems) {
-      const navDef = [['gallery', 'Liste des items', null], ['queue', 'File d\'attente', String(v.missingCount)]];
-      const navBase = 'display:flex; align-items:center; gap:10px; width:100%; height:40px; padding:0 12px; border-radius:10px; border:none; cursor:pointer; font-size:14px; font-weight:600; transition:background .12s;';
-      const subTabs = navDef.map(([key, label, badge]) => {
-        const active = s.nav === key;
-        const bg = active ? `rgba(${BX_RGB},0.13)` : 'transparent';
-        const col = active ? '#ece7df' : '#a89f93';
-        const dot = sty({ width: '7px', height: '7px', borderRadius: '2px', flexShrink: 0, background: active ? BX_LIGHT : '#4d463c' });
-        const badgeHTML = (key === 'gallery' && badge && badge !== '0')
-          ? `<span style="font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:600; color:${AMBER}; background:rgba(224,161,78,0.14); padding:2px 7px; border-radius:6px;">${esc(badge)}</span>`
-          : '';
-        return `<button data-act="nav" data-key="${key}" style="${navBase} background:${bg}; color:${col};">
-          <span style="${dot}"></span><span style="flex:1; text-align:left;">${esc(label)}</span>${badgeHTML}
-        </button>`;
-      }).join('');
-      subTabsBlock = `<div style="padding:12px 18px 7px; font-size:10.5px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:#756c60;">Gestion des items</div>
-        <nav style="padding:0 12px 6px; display:flex; flex-direction:column; gap:3px;">${subTabs}</nav>`;
-    }
-
     let catBlock = '';
     if (v.showGalleryTab) {
       const chipBase = 'display:flex; align-items:center; gap:9px; width:100%; height:34px; padding:0 11px; border-radius:9px; border:none; cursor:pointer; font-size:13px; transition:background .12s;';
@@ -256,7 +268,7 @@
       catBlock = `<div style="padding:16px 18px 8px; font-size:10.5px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:#756c60;">Catégories</div>
         <div style="padding:0 12px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; flex:1;">${chips}</div>`;
     }
-    const spacer = (v.showGalleryTab || v.showQueueTab) ? '' : '<div style="flex:1;"></div>';
+    const spacer = v.showGalleryTab ? '' : '<div style="flex:1;"></div>';
 
     let storWidget = '';
     if (v.inItems) {
@@ -287,7 +299,6 @@
       </div>
       <div style="padding:14px 18px 7px; font-size:10.5px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:#756c60;">Modules</div>
       <nav style="padding:0 12px 6px; display:flex; flex-direction:column; gap:3px;">${modules}</nav>
-      ${subTabsBlock}
       ${catBlock}
       ${spacer}
       ${storWidget}
@@ -303,10 +314,28 @@
     const missStyle = s.onlyMissing
       ? `display:flex; align-items:center; gap:8px; height:40px; padding:0 14px; border-radius:10px; border:1px solid rgba(224,161,78,0.45); background:rgba(224,161,78,0.13); color:${AMBER}; font-weight:600; font-size:13px; cursor:pointer;`
       : 'display:flex; align-items:center; gap:8px; height:40px; padding:0 14px; border-radius:10px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#a89f93; font-weight:600; font-size:13px; cursor:pointer;';
+    const importBtn = canWrite()
+      ? `<button data-act="openNew" style="display:flex; align-items:center; gap:8px; height:40px; padding:0 17px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);"><span style="font-size:17px; line-height:1; margin-top:-1px;">＋</span> Importer un item</button>`
+      : '';
     const rightTools = v.showGalleryTab
       ? `<div style="display:flex; align-items:center; gap:16px;">
           <button data-act="toggleMissing" style="${missStyle}"><span style="width:7px; height:7px; border-radius:50%; background:${AMBER};"></span> Images manquantes</button>
-          <button data-act="openNew" style="display:flex; align-items:center; gap:8px; height:40px; padding:0 17px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);"><span style="font-size:17px; line-height:1; margin-top:-1px;">＋</span> Importer un item</button>
+          ${importBtn}
+        </div>`
+      : '';
+    const readonlyBadge = !canWrite()
+      ? `<span style="display:flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;background:rgba(224,161,78,0.13);border:1px solid rgba(224,161,78,0.3);color:${AMBER};font-size:12px;font-weight:600;"><span style="width:6px;height:6px;border-radius:50%;background:${AMBER};"></span> Lecture seule</span>`
+      : '';
+    const userChip = s.user
+      ? `<div style="display:flex;align-items:center;gap:10px;">
+          ${readonlyBadge}
+          <div style="display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border-radius:20px;background:#211d16;border:1px solid rgba(236,231,223,0.08);">
+            ${s.user.avatar
+              ? `<img src="https://cdn.discordapp.com/avatars/${s.user.id}/${s.user.avatar}.png?size=32" style="width:24px;height:24px;border-radius:50%;display:block;" />`
+              : `<div style="width:24px;height:24px;border-radius:50%;background:${BX};"></div>`}
+            <span style="font-size:13px;color:#ece7df;font-weight:600;">${esc(s.user.username)}</span>
+            <button data-act="logout" title="Se déconnecter" style="width:22px;height:22px;border:none;border-radius:6px;background:transparent;color:#756c60;cursor:pointer;font-size:13px;">⏻</button>
+          </div>
         </div>`
       : '';
     return `<header style="height:64px; flex-shrink:0; border-bottom:1px solid rgba(236,231,223,0.08); display:flex; align-items:center; gap:16px; padding:0 24px; background:#16130f;">
@@ -317,6 +346,7 @@
       </div>
       <div style="flex:1;"></div>
       ${rightTools}
+      ${userChip}
     </header>`;
   }
 
@@ -422,14 +452,16 @@
     const d = state.draft;
     if (!d) return '';
     const dec = decorate(d);
+    const ro = !canWrite();
     const drop = sty({
       position: 'relative', aspectRatio: '1/1', borderRadius: '12px', overflow: 'hidden',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: ro ? 'default' : 'pointer',
       border: state.dropActive ? `2px dashed ${GR}` : '2px dashed rgba(236,231,223,0.16)',
       background: state.dropActive ? `rgba(${GR_RGB},0.08)` : '#16130f', transition: 'border-color .15s, background .15s',
     });
-    const dropInner = d.hasImage && dec.imgUrl
-      ? `<img src="${dec.imgUrl}" alt="${esc(d.label)}" style="width:100%;height:100%;object-fit:contain;display:block;background:#16130f;" loading="lazy" />`
+    const previewUrl = d.pendingFile ? `/api/library-image/${encodeURIComponent(d.pendingFile)}` : dec.imgUrl;
+    const dropInner = d.hasImage && previewUrl
+      ? `<img src="${previewUrl}" alt="${esc(d.label)}" style="width:100%;height:100%;object-fit:contain;display:block;background:#16130f;" loading="lazy" />`
       : `<div style="display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center;padding:20px;"><span style="font-size:26px;opacity:.7;">⬆</span><span style="font-size:13px;color:#a89f93;">Glissez une image ici</span><span style="font-size:11px;color:#756c60;font-family:'JetBrains Mono',monospace;">PNG · 512×512 · &lt; 256 Ko</span></div>`;
 
     const fieldInp = (key, opts) => {
@@ -438,7 +470,7 @@
       const type = opts.type || 'text';
       const step = opts.step ? `step="${opts.step}"` : '';
       const fs = opts.fs || '14px';
-      return `<input id="drf-${key}" data-act="setDraft" data-key="${key}" type="${type}" ${step} value="${esc(d[key])}" style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:${fs}; ${mono} outline:none;" />`;
+      return `<input id="drf-${key}" data-act="setDraft" data-key="${key}" type="${type}" ${step} ${ro ? 'readonly' : ''} value="${esc(d[key])}" style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:${fs}; ${mono} outline:none; ${ro ? 'opacity:.7;cursor:default;' : ''}" />`;
     };
     const lbl = (t) => `<label style="display:block; font-size:11.5px; font-weight:600; color:#a89f93; margin-bottom:6px;">${esc(t)}</label>`;
     const catOpts = Object.keys(catMeta).map((k) => `<option value="${k}" ${d.cat === k ? 'selected' : ''}>${esc(catMeta[k].label)}</option>`).join('');
@@ -452,6 +484,7 @@
     const kicker = d.id == null ? 'Nouvel item' : 'Édition';
     const saveLabel = d.id == null ? "Créer l'item" : 'Enregistrer';
     const draftPath = `/items/${d.item || 'sans_nom'}.png`;
+    const fileNameText = d.pendingFile || dec.fileName;
     const sizeText = d.hasImage ? `${d.size} Ko` : '— Ko';
 
     const backdropAnim = animate ? 'animation:fadeIn .14s ease;' : '';
@@ -468,129 +501,107 @@
         </div>
         <div style="display:grid; grid-template-columns:300px 1fr; gap:0; overflow:hidden; flex:1; min-height:0;">
           <div style="padding:22px; border-right:1px solid rgba(236,231,223,0.08); display:flex; flex-direction:column; gap:14px; overflow-y:auto;">
-            <div data-drop="1" style="${drop}">${dropInner}</div>
+            <div data-act="triggerDrop" data-drop="1" style="${drop}">${dropInner}</div>
+            <input id="file-upload-input" type="file" accept="image/png" style="display:none;" />
             <div style="display:flex; flex-direction:column; gap:7px; font-family:'JetBrains Mono',monospace; font-size:11.5px;">
-              <div style="display:flex; justify-content:space-between;"><span style="color:#756c60;">fichier</span><span style="color:#a89f93;">${esc(dec.fileName)}</span></div>
-              <div style="display:flex; justify-content:space-between;"><span style="color:#756c60;">dimensions</span><span style="color:#a89f93;">${esc(d.dims)}</span></div>
+              <div style="display:flex; justify-content:space-between;"><span style="color:#756c60;">fichier</span><span style="color:#a89f93;">${esc(fileNameText)}</span></div>
               <div style="display:flex; justify-content:space-between;"><span style="color:#756c60;">poids fichier</span><span style="color:#a89f93;">${esc(sizeText)}</span></div>
-              <div style="display:flex; justify-content:space-between;"><span style="color:#756c60;">clé R2</span><span style="color:#a89f93;">items/</span></div>
             </div>
-            <div style="display:flex; gap:8px; margin-top:auto;">
-              <button data-act="triggerDrop" style="flex:1; height:38px; border-radius:9px; border:1px solid rgba(${BX_RGB},0.45); background:rgba(${BX_RGB},0.14); color:${BX_LIGHT}; font-weight:600; font-size:13px; cursor:pointer;">Remplacer</button>
-              <button data-act="removeImage" style="height:38px; padding:0 13px; border-radius:9px; border:1px solid rgba(224,161,78,0.3); background:transparent; color:${AMBER}; font-weight:600; font-size:13px; cursor:pointer;">Retirer</button>
+            <div style="display:flex; flex-direction:column; gap:8px; margin-top:auto;">
+              ${ro ? '' : `<button data-act="openPicker" style="height:38px; border-radius:9px; border:1px dashed rgba(${GR_RGB},0.5); background:rgba(${GR_RGB},0.08); color:${GR_LIGHT}; font-weight:600; font-size:13px; cursor:pointer;">Ajouter depuis la banque d'images</button>`}
             </div>
           </div>
           <div style="padding:22px; overflow-y:auto;">
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
               <div style="grid-column:span 2;">${lbl('Label affiché')}${fieldInp('label')}</div>
               <div>${lbl('Identifiant (item)')}${fieldInp('item', { mono: true, fs: '13px' })}</div>
-              <div>${lbl('Catégorie')}<select data-act="setDraft" data-key="cat" style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${catOpts}</select></div>
-              <div>${lbl('Type (VORP)')}<select data-act="setDraft" data-key="type" style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${typeOpts}</select></div>
+              <div>${lbl('Catégorie')}<select data-act="setDraft" data-key="cat" ${ro ? 'disabled' : ''} style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${catOpts}</select></div>
+              <div>${lbl('Type (VORP)')}<select data-act="setDraft" data-key="type" ${ro ? 'disabled' : ''} style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${typeOpts}</select></div>
               <div>${lbl('Limite (stack)')}${fieldInp('limit', { type: 'number', mono: true })}</div>
               <div>${lbl('Poids (weight)')}${fieldInp('weight', { type: 'number', step: '0.01', mono: true })}</div>
               <div>${lbl('groupId')}${fieldInp('groupId', { type: 'number', mono: true })}</div>
               <div>${lbl('Dégradation (jours)')}${fieldInp('degradation', { type: 'number', mono: true })}</div>
               <div style="grid-column:span 2; display:flex; flex-wrap:wrap; gap:10px; margin-top:2px;">${toggles}</div>
-              <div style="grid-column:span 2;">${lbl('Description (desc)')}<textarea id="drf-desc" data-act="setDraft" data-key="desc" rows="2" style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; line-height:1.5; outline:none;">${esc(d.desc)}</textarea></div>
-              <div style="grid-column:span 2;">${lbl('Metadata (JSON)')}<textarea id="drf-metadata" data-act="setDraft" data-key="metadata" rows="2" style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#16130f; color:${GR_LIGHT}; font-size:12.5px; font-family:'JetBrains Mono',monospace; line-height:1.5; outline:none;">${esc(d.metadata)}</textarea></div>
+              <div style="grid-column:span 2;">${lbl('Description (desc)')}<textarea id="drf-desc" data-act="setDraft" data-key="desc" rows="2" ${ro ? 'readonly' : ''} style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; line-height:1.5; outline:none;">${esc(d.desc)}</textarea></div>
+              <div style="grid-column:span 2;">${lbl('Metadata (JSON)')}<textarea id="drf-metadata" data-act="setDraft" data-key="metadata" rows="2" ${ro ? 'readonly' : ''} style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#16130f; color:${GR_LIGHT}; font-size:12.5px; font-family:'JetBrains Mono',monospace; line-height:1.5; outline:none;">${esc(d.metadata)}</textarea></div>
             </div>
           </div>
         </div>
         <div style="display:flex; align-items:center; gap:12px; padding:16px 22px; border-top:1px solid rgba(236,231,223,0.08); background:#16130f;">
           <span style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#756c60;">${esc(draftPath)}</span>
           <div style="flex:1;"></div>
-          <button data-act="closeModal" style="height:40px; padding:0 18px; border-radius:10px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:13.5px; cursor:pointer;">Annuler</button>
-          <button data-act="saveDraft" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);">${esc(saveLabel)}</button>
+          <button data-act="closeModal" style="height:40px; padding:0 18px; border-radius:10px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:13.5px; cursor:pointer;">${ro ? 'Fermer' : 'Annuler'}</button>
+          ${ro ? '' : `<button data-act="saveDraft" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);">${esc(saveLabel)}</button>`}
         </div>
       </div>
     </div>`;
   }
 
-  function queueHTML(v) {
-    if (v.matchesLoading) {
-      return `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:80px 0; color:#756c60; gap:14px;">
-        <div style="font-size:15px; color:#a89f93;">Analyse des correspondances en cours…</div>
-        <div style="font-size:12px;">Comparaison de ${v.missingCount} items contre la bibliothèque d'images.</div>
-      </div>`;
+  function pickerModalHTML(animate) {
+    if (!state.pickerOpen || !state.draft) return '';
+    const allFiles = computeVals().pickerFiles;
+    const visibleCount = Math.min(state.pickerVisibleCount, allFiles.length);
+    const files = allFiles.slice(0, visibleCount);
+    const backdropAnim = animate ? 'animation:fadeIn .14s ease;' : '';
+    const modalAnim = animate ? 'animation:popIn .2s cubic-bezier(.2,.7,.3,1);' : '';
+
+    let body;
+    if (state.libraryLoading) {
+      body = `<div style="padding:60px 0; text-align:center; color:#756c60;">Chargement de la bibliothèque…</div>`;
+    } else if (state.libraryError) {
+      body = `<div style="padding:60px 0; text-align:center; color:#756c60;">Impossible de lire le dossier d'images.</div>`;
+    } else if (!allFiles.length) {
+      body = `<div style="padding:60px 0; text-align:center; color:#756c60;">Aucune image ne correspond.</div>`;
+    } else {
+      const cards = files.map((file) => {
+        const active = file === state.pickerSelectedFile;
+        const imgUrl = `/api/library-image/${encodeURIComponent(file)}`;
+        const border = active ? `1px solid rgba(${GR_RGB},0.75)` : '1px solid rgba(236,231,223,0.08)';
+        const bg = active ? `rgba(${GR_RGB},0.1)` : '#211d16';
+        return `<button data-act="selectPickerFile" data-file="${esc(file)}" title="${esc(file)}" style="text-align:left; background:${bg}; border:${border}; border-radius:11px; padding:0; overflow:hidden; cursor:pointer; color:#ece7df;">
+          <div style="aspect-ratio:1/1; background:#16130f; display:flex; align-items:center; justify-content:center; border-bottom:1px solid rgba(236,231,223,0.06);">
+            <img src="${imgUrl}" alt="${esc(file)}" loading="lazy" style="width:100%; height:100%; object-fit:contain; display:block;" />
+          </div>
+          <div style="padding:8px 9px; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:${active ? '#ece7df' : '#a89f93'}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(file)}</div>
+        </button>`;
+      }).join('');
+      const grid = `<div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px;">${cards}</div>`;
+      const sentinel = visibleCount < allFiles.length
+        ? `<div style="padding:18px 0; text-align:center; font-size:12px; color:#756c60;">Chargement de la suite au défilement…</div>`
+        : '';
+      body = grid + sentinel;
     }
 
-    const hasMatches = Object.keys(state.matches).length > 0;
-    if (!hasMatches) {
-      return `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:80px 0; gap:16px; text-align:center;">
-        <div style="font-size:15px; color:#a89f93;">Analysez les correspondances pour commencer.</div>
-        <button data-act="loadMatches" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${BX}; color:#ffe9e6; font-weight:700; font-size:13.5px; cursor:pointer;">
-          Lancer l'analyse (${v.missingCount} items)
-        </button>
-      </div>`;
-    }
-
-    if (!v.queueItems.length) {
-      return `<div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:80px 0; color:#756c60; text-align:center;">
-        <div style="font-size:15px; color:#a89f93;">Tous les items ont une image. 🎉</div>
-      </div>`;
-    }
-
-    const validatedCount = v.validatedCount;
-    const head = `<div style="display:grid; grid-template-columns:1.2fr 1fr 1.8fr 44px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;">
-      <span>Item</span><span>Identifiant</span><span>Candidat proposé</span><span>✓</span>
-    </div>`;
-
-    const rows = v.queueItems.map((it) => {
-      const scoreColor = !it.candidates.length ? '#756c60'
-        : it.candidates[0].score >= 0.9 ? GR_LIGHT
-        : it.candidates[0].score >= 0.7 ? AMBER
-        : '#cf6f6f';
-      const scoreText = it.candidates.length ? (it.candidates[0].score * 100).toFixed(0) + '%' : '—';
-
-      const opts = it.candidates.map((c) =>
-        `<option value="${esc(c.file)}" ${it.selected === c.file ? 'selected' : ''}>${esc(c.file)} (${(c.score*100).toFixed(0)}%)</option>`
-      ).join('');
-      const picker = it.candidates.length
-        ? `<div style="display:flex; align-items:center; gap:8px;">
-            <select data-act="selectMatch" data-item="${esc(it.item)}" style="flex:1; height:34px; padding:0 10px; border-radius:8px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:12px; outline:none; cursor:pointer;">${opts}</select>
-            <span style="font-size:11px; font-family:'JetBrains Mono',monospace; color:${scoreColor}; flex-shrink:0;">${scoreText}</span>
-          </div>`
-        : `<span style="font-size:12px; color:#756c60;">Aucun candidat</span>`;
-
-      const checkbox = `<div data-act="toggleValidate" data-item="${esc(it.item)}" style="width:22px; height:22px; border-radius:6px; border:2px solid ${it.validated ? GR : 'rgba(236,231,223,0.2)'}; background:${it.validated ? GR : 'transparent'}; cursor:pointer; display:flex; align-items:center; justify-content:center; color:${ON_GR}; font-size:13px; flex-shrink:0;">${it.validated ? '✓' : ''}</div>`;
-
-      return `<div style="display:grid; grid-template-columns:1.2fr 1fr 1.8fr 44px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05);">
-        <span style="font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</span>
-        <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#a89f93; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.item)}</span>
-        ${picker}
-        <div style="display:flex; align-items:center; justify-content:center;">${checkbox}</div>
-      </div>`;
-    }).join('');
-
-    const sortOpts = [['score_desc','Score ↓'], ['score_asc','Score ↑'], ['az','Nom (A → Z)']];
-    const sortSel = `<select data-act="queueSort" style="height:36px; padding:0 30px 0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16 url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22><path d=%22M1 3l4 4 4-4%22 stroke=%22%23a89f93%22 stroke-width=%221.5%22 fill=%22none%22/></svg>') no-repeat right 11px center; color:#ece7df; font-size:13px; cursor:pointer; outline:none;">
-      ${sortOpts.map(([val, lbl]) => `<option value="${val}" ${state.queueSort === val ? 'selected' : ''}>${esc(lbl)}</option>`).join('')}
-    </select>`;
-
-    const bulk = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
-      <div style="display:flex; align-items:center; gap:10px;">
-        <span style="font-size:18px; font-weight:700;">File d'attente</span>
-        <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#756c60; background:#211d16; border:1px solid rgba(236,231,223,0.07); padding:3px 9px; border-radius:7px;">${v.queueItems.length} items</span>
-        ${sortSel}
-      </div>
-      <div style="display:flex; gap:10px; align-items:center;">
-        <span style="font-size:12px; color:#756c60;">${validatedCount} validé(s)</span>
-        <div style="display:flex;align-items:center;gap:8px;background:#211d16;border:1px solid rgba(236,231,223,0.12);border-radius:9px;padding:0 12px;height:36px;">
-          <span style="font-size:12px;color:#a89f93;">Seuil</span>
-          <input id="threshold-input" data-act="queueThreshold" type="number" min="1" max="100" value="${state.queueThreshold}" style="width:44px;background:transparent;border:none;color:#ece7df;font-size:13px;font-weight:600;font-family:'JetBrains Mono',monospace;outline:none;text-align:center;" />
-          <span style="font-size:12px;color:#a89f93;">%</span>
+    return `<div data-act="closePicker" style="position:fixed; inset:0; background:rgba(8,6,4,0.66); backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; padding:32px; z-index:60; ${backdropAnim}">
+      <div data-act="stop" style="width:100%; max-width:780px; max-height:84vh; background:#1a1712; border:1px solid rgba(236,231,223,0.1); border-radius:16px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 30px 80px rgba(0,0,0,0.6); ${modalAnim}">
+        <div style="display:flex; align-items:center; gap:12px; padding:18px 22px; border-bottom:1px solid rgba(236,231,223,0.08);">
+          <div>
+            <div style="font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:${BX_LIGHT};">Banque d'images</div>
+            <div style="font-size:18px; font-weight:700; margin-top:2px;">Choisir une image pour ${esc(state.draft.label || state.draft.item || 'cet item')}</div>
+            <div style="font-size:11px; color:#756c60; margin-top:2px; font-family:'JetBrains Mono',monospace;">${visibleCount} / ${allFiles.length} images</div>
+          </div>
+          <div style="flex:1;"></div>
+          <button data-act="closePicker" style="width:34px; height:34px; border:1px solid rgba(236,231,223,0.1); border-radius:9px; background:#211d16; color:#a89f93; cursor:pointer; font-size:15px;">✕</button>
         </div>
-        <button data-act="validateAll" style="height:36px; padding:0 16px; border-radius:9px; border:1px solid rgba(236,231,223,0.12); background:#211d16; color:#ece7df; font-size:13px; font-weight:600; cursor:pointer;">Valider ≥ ${state.queueThreshold}%</button>
-        <button data-act="publishAll" style="height:36px; padding:0 16px; border-radius:9px; border:none; background:${GR}; color:${ON_GR}; font-size:13px; font-weight:700; cursor:pointer; opacity:${validatedCount ? 1 : 0.4};">Publier ${validatedCount} item(s)</button>
+        <div style="padding:16px 22px 0;">
+          <div style="position:relative;">
+            <span style="position:absolute; left:13px; top:50%; transform:translateY(-50%); color:#756c60; font-size:15px;">⌕</span>
+            <input id="picker-query" data-act="pickerQuery" value="${esc(state.pickerQuery)}" placeholder="Rechercher un fichier…" style="width:100%; height:40px; padding:0 14px 0 34px; border-radius:10px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:14px; outline:none;" />
+          </div>
+        </div>
+        <div data-scroll-picker style="padding:16px 22px 22px; overflow-y:auto; flex:1; min-height:0;">${body}</div>
+        <div style="display:flex; align-items:center; gap:12px; padding:16px 22px; border-top:1px solid rgba(236,231,223,0.08); background:#16130f;">
+          <span style="font-size:12px; color:#756c60; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${state.pickerSelectedFile ? esc(state.pickerSelectedFile) : 'Sélectionnez une image.'}</span>
+          <div style="flex:1;"></div>
+          <button data-act="closePicker" style="height:40px; padding:0 18px; border-radius:10px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:13.5px; cursor:pointer;">Annuler</button>
+          <button data-act="confirmPicker" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25); opacity:${state.pickerSelectedFile ? 1 : 0.42};">Importer cette image</button>
+        </div>
       </div>
     </div>`;
-
-    return bulk + `<div style="border:1px solid rgba(236,231,223,0.08); border-radius:12px; overflow:hidden;">${head}${rows}</div>`;
   }
 
   function contentHTML(v) {
     if (v.showModuleSoon) return moduleSoonHTML(v);
-    if (v.showQueueTab) return queueHTML(v);
     let body = statsHTML(v) + toolbarHTML(v);
     if (v.isEmpty) body += emptyHTML();
     else if (v.showGrid) body += gridHTML(v);
@@ -599,6 +610,7 @@
   }
 
   let _modalWasOpen = false;
+  let _pickerWasOpen = false;
 
   // Rendu + restauration du focus
   function captureFocus() {
@@ -618,18 +630,38 @@
     }
   }
 
+  function loginHTML() {
+    return `<div style="display:flex;align-items:center;justify-content:center;height:100vh;width:100%;background:#14120f;">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:22px;padding:40px;text-align:center;max-width:380px;">
+        <div>
+          <div style="font-weight:800;font-size:20px;letter-spacing:-0.01em;color:#ece7df;margin-bottom:15px">Panel New Frontier RP</div>
+        <a href="/auth/discord/login" style="display:flex;align-items:center;gap:10px;height:44px;padding:0 24px;border-radius:11px;background:#5865F2;color:#fff;font-weight:700;font-size:14px;text-decoration:none;box-shadow:0 4px 14px rgba(88,101,242,0.3);">
+          Se connecter avec Discord
+        </a>
+      </div>
+    </div>`;
+  }
+
   function render() {
+    if (!state.authChecked) return; // attend la réponse de /api/me avant le premier rendu
+    if (!state.user) { root.innerHTML = loginHTML(); return; }
     const cap = captureFocus();
     const scrollEl = root.querySelector('[data-scroll]');
     const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+    const pickerScrollEl = root.querySelector('[data-scroll-picker]');
+    const pickerScrollTop = pickerScrollEl ? pickerScrollEl.scrollTop : 0;
     const v = computeVals();
     const modalJustOpened = !!state.draft && !_modalWasOpen;
     _modalWasOpen = !!state.draft;
-    const publishingOverlay = state.publishing ? `
+    const pickerJustOpened = state.pickerOpen && !_pickerWasOpen;
+    _pickerWasOpen = state.pickerOpen;
+    const busyTitle = state.uploading ? 'Téléversement en cours…' : 'Publication en cours…';
+    const busySub = state.uploading ? "Envoi de l'image vers la bibliothèque" : 'Envoi des images vers Cloudflare R2';
+    const publishingOverlay = (state.publishing || state.uploading) ? `
       <div style="position:fixed;inset:0;background:rgba(8,6,4,0.75);backdrop-filter:blur(4px);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;animation:fadeIn .15s ease;">
         <div style="display:flex;gap:6px;">${[0,1,2].map((i) => `<div style="width:10px;height:10px;border-radius:50%;background:${BX_LIGHT};animation:bounce .9s ease-in-out ${i*0.18}s infinite alternate;"></div>`).join('')}</div>
-        <div style="font-size:15px;font-weight:600;color:#ece7df;letter-spacing:0.01em;">Publication en cours…</div>
-        <div style="font-size:12px;color:#756c60;">Envoi des images vers Cloudflare R2</div>
+        <div style="font-size:15px;font-weight:600;color:#ece7df;letter-spacing:0.01em;">${busyTitle}</div>
+        <div style="font-size:12px;color:#756c60;">${busySub}</div>
       </div>` : '';
     root.innerHTML = `<style>@keyframes bounce{from{transform:translateY(0)}to{transform:translateY(-10px)}}</style>
       <div style="display:flex; height:100vh; width:100%; overflow:hidden;">
@@ -638,23 +670,30 @@
           ${headerHTML(v)}
           <div data-scroll style="flex:1; overflow-y:auto; padding:24px 24px 48px;">${contentHTML(v)}</div>
         </main>
-      </div>${modalHTML(modalJustOpened)}${publishingOverlay}`;
+      </div>${modalHTML(modalJustOpened)}${pickerModalHTML(pickerJustOpened)}${publishingOverlay}`;
     restoreFocus(cap);
     const newScrollEl = root.querySelector('[data-scroll]');
     if (newScrollEl && scrollTop) newScrollEl.scrollTop = scrollTop;
+    const newPickerScrollEl = root.querySelector('[data-scroll-picker]');
+    if (newPickerScrollEl && pickerScrollTop) newPickerScrollEl.scrollTop = pickerScrollTop;
   }
 
   // Dispatch des événements
   function actEl(target) { return target.closest('[data-act]'); }
+
+  const WRITE_ACTIONS = new Set(['openNew', 'saveDraft', 'triggerDrop', 'togDraft', 'openPicker', 'confirmPicker']);
 
   root.addEventListener('click', (e) => {
     const el = actEl(e.target);
     if (!el) return;
     const act = el.dataset.act;
     const key = el.dataset.key;
+    if (WRITE_ACTIONS.has(act) && !canWrite()) return; // garde-fou — l'UI masque déjà ces actions
     switch (act) {
+      case 'logout':
+        fetch('/auth/logout', { method: 'POST' }).then(() => { window.location.href = '/'; });
+        break;
       case 'module': state.module = key; render(); break;
-      case 'nav': state.nav = key; render(); break;
       case 'cat': state.cat = key; render(); break;
       case 'clearQuery': state.query = ''; render(); break;
       case 'toggleMissing': state.onlyMissing = !state.onlyMissing; render(); break;
@@ -664,49 +703,30 @@
       case 'closeModal': closeModal(); break;
       case 'stop': e.stopPropagation(); break;
       case 'saveDraft': saveDraft(); break;
-      case 'triggerDrop': dropImage(); break;
-      case 'removeImage':
-        if (state.draft) { state.draft = Object.assign({}, state.draft, { hasImage: false, size: 0, dims: '—' }); render(); }
+      case 'triggerDrop': {
+        const input = document.getElementById('file-upload-input');
+        if (input) input.click();
         break;
+      }
       case 'togDraft':
         if (state.draft) { state.draft = Object.assign({}, state.draft, { [key]: +state.draft[key] ? 0 : 1 }); render(); }
         break;
-      case 'loadMatches': loadMatches(); break;
-      case 'toggleValidate': {
-        const itKey = el.dataset.item;
-        const v2 = Object.assign({}, state.validated);
-        if (v2[itKey]) delete v2[itKey]; else v2[itKey] = true;
-        state.validated = v2; render(); break;
-      }
-      case 'validateAll': {
-        const threshold = state.queueThreshold / 100;
-        const v2 = Object.assign({}, state.validated);
-        state.items.filter((it) => !it.hasImage).forEach((it) => {
-          const m = state.matches[it.item];
-          if (m && m.candidates[0] && m.candidates[0].score >= threshold) v2[it.item] = true;
-        });
-        state.validated = v2; render(); break;
-      }
-      case 'publishAll': {
-        const toPublish = state.items
-          .filter((it) => !it.hasImage && state.validated[it.item])
-          .map((it) => ({ item: it.item, file: (state.matches[it.item] || {}).selected }))
-          .filter((x) => x.file);
-        if (!toPublish.length) break;
-        state.publishing = true; render();
-        fetch('/api/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: toPublish }) })
-          .then((r) => r.json())
-          .then((data) => {
-            const ok = data.results.filter((r) => r.ok).map((r) => r.item);
-            ok.forEach((item) => {
-              const idx = state.items.findIndex((i) => i.item === item);
-              if (idx >= 0) state.items[idx] = Object.assign({}, state.items[idx], { hasImage: true });
-              const v2 = Object.assign({}, state.validated); delete v2[item]; state.validated = v2;
-            });
-            state.publishing = false;
-            setFlash(`${ok.length} image(s) publiée(s) sur R2.${data.failed ? ' ' + data.failed + ' erreur(s).' : ''}`);
-          })
-          .catch(() => { state.publishing = false; setFlash('Erreur lors de la publication.'); });
+      case 'openPicker':
+        if (!state.draft) break;
+        if (!state.libraryFiles.length && !state.libraryLoading) loadLibrary();
+        state.pickerOpen = true;
+        state.pickerQuery = '';
+        state.pickerSelectedFile = null;
+        state.pickerVisibleCount = PICKER_CHUNK;
+        render();
+        break;
+      case 'closePicker': state.pickerOpen = false; render(); break;
+      case 'selectPickerFile': state.pickerSelectedFile = el.dataset.file; render(); break;
+      case 'confirmPicker': {
+        if (!state.pickerSelectedFile || !state.draft) break;
+        state.draft = Object.assign({}, state.draft, { pendingFile: state.pickerSelectedFile, hasImage: true });
+        state.pickerOpen = false;
+        render();
         break;
       }
       default: break;
@@ -719,13 +739,7 @@
     const act = el.dataset.act;
     const key = el.dataset.key;
     const val = e.target.value;
-    if (act === 'selectMatch') {
-      const itKey = el.dataset.item;
-      state.matches = Object.assign({}, state.matches, { [itKey]: Object.assign({}, state.matches[itKey], { selected: val }) });
-      // pas de render — le select gère son propre état visuel
-    }
-    else if (act === 'queueThreshold') { const n = parseInt(val, 10); if (n >= 1 && n <= 100) state.queueThreshold = n; }
-    else if (act === 'queueSort') { state.queueSort = val; render(); }
+    if (act === 'pickerQuery') { state.pickerQuery = val; state.pickerVisibleCount = PICKER_CHUNK; render(); }
     else if (act === 'query') { state.query = val; render(); }
     else if (act === 'sort') { state.sort = val; render(); }
     else if (act === 'setDraft' && state.draft) { state.draft = Object.assign({}, state.draft, { [key]: val }); }
@@ -733,10 +747,12 @@
   root.addEventListener('input', onValueChange);
   root.addEventListener('change', onValueChange);
 
-  root.addEventListener('blur', (e) => {
-    const el = e.target.closest('[data-act="queueThreshold"]');
-    if (el) render();
-  }, true);
+  root.addEventListener('change', (e) => {
+    if (e.target.id !== 'file-upload-input' || !canWrite()) return;
+    const file = e.target.files && e.target.files[0];
+    if (file) uploadAndAttach(file);
+    e.target.value = '';
+  });
 
   // Drag & drop (zone de la modale)
   root.addEventListener('dragover', (e) => {
@@ -754,10 +770,23 @@
   });
   root.addEventListener('drop', (e) => {
     const zone = e.target.closest('[data-drop]');
-    if (!zone) return;
+    if (!zone || !canWrite()) return;
     e.preventDefault();
-    dropImage();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) uploadAndAttach(file);
   });
+
+  // Chargement progressif de la banque d'images (scroll non-bubbling -> capture)
+  root.addEventListener('scroll', (e) => {
+    const el = e.target;
+    if (!(el instanceof Element) || !el.hasAttribute('data-scroll-picker')) return;
+    const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 400;
+    if (!nearBottom) return;
+    const total = computeVals().pickerFiles.length;
+    if (state.pickerVisibleCount >= total) return;
+    state.pickerVisibleCount = Math.min(total, state.pickerVisibleCount + PICKER_CHUNK);
+    render();
+  }, true);
 
   function loadConfig() {
     fetch('/api/config')
@@ -776,31 +805,47 @@
   function loadItems() {
     fetch('/api/items')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((data) => { if (Array.isArray(data) && data.length) { state.items = data; render(); } })
+      .then((data) => {
+        if (Array.isArray(data) && data.length) { state.items = data; render(); }
+      })
       .catch(() => {});
   }
 
-  function loadMatches() {
-    if (state.matchesLoading) return;
-    state.matchesLoading = true;
+  function loadLibrary() {
+    if (state.libraryLoading) return;
+    state.libraryLoading = true;
+    state.libraryError = null;
     render();
-    fetch('/api/match')
+    fetch('/api/library')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data) => {
-        const m = {};
-        data.forEach((row) => {
-          m[row.item] = { candidates: row.candidates, selected: row.candidates[0] ? row.candidates[0].file : null };
-        });
-        state.matches = m;
-        state.matchesLoading = false;
+        state.libraryFiles = Array.isArray(data.files) ? data.files : [];
+        state.libraryLoading = false;
         render();
       })
-      .catch(() => { state.matchesLoading = false; render(); });
+      .catch(() => {
+        state.libraryLoading = false;
+        state.libraryError = 'library_error';
+        render();
+      });
+  }
+
+  function checkAuth() {
+    fetch('/api/me')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((data) => {
+        state.user = data.user;
+        state.access = data.access;
+        state.authChecked = true;
+        render();
+        loadConfig();
+        loadItems();
+        loadLibrary();
+        loadStats();
+      })
+      .catch(() => { state.user = null; state.authChecked = true; render(); });
   }
 
   // Go
-  render();
-  loadConfig();
-  loadItems();
-  loadStats();
+  checkAuth();
 })();
