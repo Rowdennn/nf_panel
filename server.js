@@ -1,13 +1,17 @@
 require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
+const cookieSession = require('cookie-session');
+const multer = require('multer');
 const db = require('./db');
 const { match } = require('./matcher');
 const r2 = require('./r2');
+const auth = require('./auth');
 
 // Cache de la liste R2 — rafraîchi au démarrage et après chaque publish.
-let r2Cache = new Map(); // nom → sizeBytes
+let r2Cache = new Map(); // nom → { sizeBytes, mtime }
 function refreshR2Cache() {
   if (!r2.isConfigured()) return;
   r2.listItemNames().then((map) => { r2Cache = map; }).catch(() => {});
@@ -16,8 +20,18 @@ refreshR2Cache();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const isProd = process.env.NODE_ENV === 'production';
 
+app.set('trust proxy', 1);
 app.use(express.json());
+app.use(cookieSession({
+  name: 'nfr_session',
+  secret: process.env.SESSION_SECRET || 'dev-only-insecure-secret',
+  httpOnly: true,
+  sameSite: 'lax',
+  secure: isProd,
+  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 jours
+}));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true, dbConfigured: db.isConfigured() }));
@@ -25,6 +39,55 @@ app.get('/healthz', (_req, res) => res.json({ ok: true, dbConfigured: db.isConfi
 app.get('/api/config', (_req, res) => res.json({
   cdnBase: process.env.R2_PUBLIC_BASE_URL || '',
 }));
+
+// --- Auth Discord -----------------------------------------------------------
+app.get('/auth/discord/login', (req, res) => {
+  if (!auth.isConfigured()) return res.status(503).send('Auth Discord non configurée.');
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.oauthState = state;
+  res.redirect(auth.getAuthorizeUrl(state));
+});
+
+app.get('/auth/discord/callback', async (req, res) => {
+  if (!auth.isConfigured()) return res.status(503).send('Auth Discord non configurée.');
+  const { code, state } = req.query;
+  if (!code || !state || state !== req.session.oauthState) {
+    return res.status(400).send('Requête invalide (state).');
+  }
+  req.session.oauthState = null;
+  try {
+    const token = await auth.exchangeCode(code);
+    const [user, member] = await Promise.all([auth.fetchUser(token), auth.fetchGuildMember(token)]);
+    const access = auth.computeAccess(member);
+    if (!access) return res.status(403).send('Vous n\'êtes pas membre du Discord requis.');
+    req.session.user = { id: user.id, username: user.username, avatar: user.avatar };
+    req.session.access = access;
+    res.redirect('/');
+  } catch (e) {
+    console.error('[auth/callback]', e.message);
+    res.status(500).send('Échec de la connexion Discord.');
+  }
+});
+
+app.post('/auth/logout', (req, res) => {
+  req.session = null;
+  res.json({ ok: true });
+});
+
+app.get('/api/me', (req, res) => {
+  if (!req.session || !req.session.user) return res.status(401).json({ error: 'unauthenticated' });
+  res.json({ user: req.session.user, access: req.session.access });
+});
+
+function requireAuth(req, res, next) {
+  if (!req.session || !req.session.user) return res.status(401).json({ error: 'unauthenticated' });
+  next();
+}
+function requireWrite(req, res, next) {
+  if (req.session.access !== 'full') return res.status(403).json({ error: 'forbidden' });
+  next();
+}
+app.use('/api', requireAuth);
 
 // VORP ne stocke pas cat/poids/groupId/metadata : défauts + cat devinée du nom/type.
 function mapItem(row, i) {
@@ -50,6 +113,7 @@ function mapItem(row, i) {
     metadata: row.metadata || '{}',
     hasImage: false, // calculé étape 2 (matching R2)
     size: 0,
+    updatedAt: 0, // cache-buster pour l'URL CDN
     dims: '—',
   };
 }
@@ -61,8 +125,10 @@ app.get('/api/items', async (_req, res) => {
     res.json(rows.map((row, i) => {
       const key = row.item.toLowerCase();
       const mapped = mapItem(row, i);
-      mapped.hasImage = r2Cache.has(key);
-      mapped.size = r2Cache.has(key) ? Math.round(r2Cache.get(key) / 1024) : 0;
+      const r2Entry = r2Cache.get(key);
+      mapped.hasImage = !!r2Entry;
+      mapped.size = r2Entry ? Math.round(r2Entry.sizeBytes / 1024) : 0;
+      mapped.updatedAt = r2Entry ? r2Entry.mtime : 0;
       return mapped;
     }));
   } catch (e) {
@@ -78,9 +144,63 @@ function libraryFiles() {
   return fs.readdirSync(dir).filter((f) => /\.png$/i.test(f));
 }
 
+function libraryFilePath(file) {
+  const dir = process.env.LIBRARY_PATH;
+  if (!dir || !fs.existsSync(dir)) return null;
+  const name = path.basename(String(file || ''));
+  if (!/\.png$/i.test(name)) return null;
+  const fullPath = path.resolve(dir, name);
+  const root = path.resolve(dir);
+  if (!fullPath.startsWith(root + path.sep)) return null;
+  return fs.existsSync(fullPath) ? fullPath : null;
+}
+
 app.get('/api/library', (_req, res) => {
   const files = libraryFiles();
   res.json({ count: files.length, files });
+});
+
+app.get('/api/library-image/:file', (req, res) => {
+  const filePath = libraryFilePath(req.params.file);
+  if (!filePath) return res.status(404).json({ error: 'image_not_found' });
+  res.sendFile(filePath);
+});
+
+// Upload d'une image externe vers la bibliothèque (LIBRARY_PATH). Le fichier
+// enregistré devient ensuite utilisable comme n'importe quel fichier de la
+// bibliothèque (publication via /api/publish au moment de l'enregistrement).
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = process.env.LIBRARY_PATH;
+      if (!dir || !fs.existsSync(dir)) return cb(new Error('library_path_not_configured'));
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const safeBase = path.basename(file.originalname, path.extname(file.originalname))
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 60) || 'upload';
+      cb(null, `${safeBase}_${Date.now()}.png`);
+    },
+  }),
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype !== 'image/png') return cb(new Error('invalid_file_type'));
+    cb(null, true);
+  },
+  limits: { fileSize: 8 * 1024 * 1024 }, // 8 Mo
+});
+
+app.post('/api/upload', requireWrite, (req, res) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) {
+      const code = err.message === 'invalid_file_type' ? 'invalid_file_type'
+        : err.code === 'LIMIT_FILE_SIZE' ? 'file_too_large'
+        : 'upload_error';
+      return res.status(400).json({ error: code });
+    }
+    if (!req.file) return res.status(400).json({ error: 'file_required' });
+    res.json({ file: req.file.filename });
+  });
 });
 
 // Matching flou : pour chaque item, propose les meilleurs candidats image.
@@ -133,7 +253,7 @@ app.get('/api/stats', async (_req, res) => {
 
 // Publie une liste d'items vers R2 : { items: [{ item, file }] }
 // file = nom du fichier source dans LIBRARY_PATH
-app.post('/api/publish', async (req, res) => {
+app.post('/api/publish', requireWrite, async (req, res) => {
   if (!r2.isConfigured()) return res.status(503).json({ error: 'r2_not_configured' });
   const list = req.body.items;
   if (!Array.isArray(list) || !list.length) return res.status(400).json({ error: 'items_required' });
@@ -144,7 +264,8 @@ app.post('/api/publish', async (req, res) => {
   for (const { item, file } of list) {
     if (!item || !file) { results.push({ item, ok: false, error: 'missing_fields' }); continue; }
     try {
-      const key = await r2.uploadItem(item, file, libraryPath);
+      const { key, sizeBytes } = await r2.uploadItem(item, file, libraryPath);
+      r2Cache.set(item.toLowerCase(), { sizeBytes, mtime: Date.now() });
       results.push({ item, ok: true, key });
     } catch (e) {
       console.error('[/api/publish]', item, e.message);
@@ -153,10 +274,10 @@ app.post('/api/publish', async (req, res) => {
   }
 
   const failed = results.filter((r) => !r.ok);
-  if (results.some((r) => r.ok)) refreshR2Cache();
   res.status(failed.length && failed.length === results.length ? 500 : 200).json({ results, failed: failed.length });
 });
 
-app.listen(PORT, () => {
-  console.log(`NFR Panel sur http://localhost:${PORT}  (DB configurée: ${db.isConfigured()})`);
+const listenHost = isProd ? '127.0.0.1' : undefined;
+app.listen(PORT, listenHost, () => {
+  console.log(`NFR Panel sur http://localhost:${PORT}  (DB: ${db.isConfigured()}, Discord: ${auth.isConfigured()})`);
 });
