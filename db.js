@@ -1,4 +1,4 @@
-// VORP MySQL — lecture seule (table items).
+// VORP MySQL — table items (lecture + mise à jour des métadonnées).
 const mysql = require('mysql2/promise');
 
 let pool = null;
@@ -35,4 +35,25 @@ async function fetchItems() {
   return rows;
 }
 
-module.exports = { isConfigured, fetchItems, getPool };
+// Groupes valides (table item_group) — source de vérité de la contrainte FK
+// sur items.groupId.
+async function fetchGroups() {
+  const [rows] = await getPool().query('SELECT `id`, `description` FROM `item_group` ORDER BY `id`');
+  return rows;
+}
+
+const UPDATABLE_COLS = new Set(['label', 'groupId', 'limit', 'weight', 'can_remove', 'usable', 'useExpired', 'degradation', 'desc', 'metadata']);
+
+async function updateItem(itemName, fields) {
+  const entries = Object.entries(fields).filter(([k]) => UPDATABLE_COLS.has(k));
+  if (!entries.length) throw new Error('no_fields');
+  const set = entries.map(([k]) => `\`${k}\` = ?`).join(', ');
+  const values = [...entries.map(([, v]) => v), itemName];
+  const [result] = await getPool().execute(
+    `UPDATE \`${itemsTable()}\` SET ${set} WHERE \`item\` = ?`,
+    values
+  );
+  return result.affectedRows;
+}
+
+module.exports = { isConfigured, fetchItems, fetchGroups, updateItem, getPool };

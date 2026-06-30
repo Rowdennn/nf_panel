@@ -23,8 +23,6 @@ select { appearance: none; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
 /* hover states (la maquette utilisait style-hover, on le reproduit en CSS) */
-.item-card { transition: transform .14s, border-color .14s, box-shadow .14s; }
-.item-card:hover { background: #272219 !important; border-color: rgba(138,34,48,0.4) !important; transform: translateY(-3px); box-shadow: 0 12px 26px rgba(0,0,0,0.4); }
 .list-row { transition: background .12s; }
 .list-row:hover { background: #1f1b15 !important; }
 
