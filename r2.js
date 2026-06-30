@@ -17,9 +17,23 @@ function client() {
   });
 }
 
+const SAFE_ITEM_NAME = /^[a-zA-Z0-9_-]+$/;
+
+// Résout sourceFile sous libraryPath en bloquant toute tentative de traversal
+// (../, chemins absolus). Lève si le fichier sort du dossier autorisé.
+function safeLibraryPath(libraryPath, sourceFile) {
+  const root = path.resolve(libraryPath);
+  const name = path.basename(String(sourceFile || ''));
+  if (!name || !/\.png$/i.test(name)) throw new Error('invalid_source_file');
+  const fullPath = path.resolve(root, name);
+  if (fullPath !== root && !fullPath.startsWith(root + path.sep)) throw new Error('invalid_source_file');
+  return fullPath;
+}
+
 // Upload un fichier source vers R2 sous la clé items/<item>.png.
 async function uploadItem(itemName, sourceFile, libraryPath) {
-  const filePath = path.join(libraryPath, sourceFile);
+  if (!SAFE_ITEM_NAME.test(String(itemName || ''))) throw new Error('invalid_item_name');
+  const filePath = safeLibraryPath(libraryPath, sourceFile);
   const body = fs.readFileSync(filePath);
   const key = `items/${itemName}.png`;
   await client().send(new PutObjectCommand({

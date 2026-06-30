@@ -22,6 +22,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
+if (isProd && !process.env.SESSION_SECRET) {
+  console.error('SESSION_SECRET manquant en production — arrêt (le secret de repli est public dans le code source).');
+  process.exit(1);
+}
+
 app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cookieSession({
