@@ -29,7 +29,7 @@ async function uploadItem(itemName, sourceFile, libraryPath) {
     ContentType: 'image/png',
     CacheControl: 'public, max-age=31536000',
   }));
-  return key;
+  return { key, sizeBytes: body.length };
 }
 
 // Vérifie si items/<item>.png existe déjà dans R2.
@@ -40,7 +40,8 @@ async function exists(itemName) {
   } catch { return false; }
 }
 
-// Retourne un Map nom→sizeBytes des items présents dans R2.
+// Retourne un Map nom→{sizeBytes, mtime} des items présents dans R2.
+// mtime sert de cache-buster (?v=mtime) pour forcer le rechargement après remplacement.
 async function listItemNames() {
   const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
   const c = new S3Client({ region: 'auto', endpoint: process.env.R2_ENDPOINT, credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY } });
@@ -50,7 +51,7 @@ async function listItemNames() {
     const r = await c.send(new ListObjectsV2Command({ Bucket: process.env.R2_BUCKET, Prefix: 'items/', ContinuationToken: token }));
     (r.Contents || []).forEach((o) => {
       const name = o.Key.replace(/^items\//, '').replace(/\.png$/i, '').toLowerCase();
-      if (name) map.set(name, o.Size || 0);
+      if (name) map.set(name, { sizeBytes: o.Size || 0, mtime: o.LastModified ? new Date(o.LastModified).getTime() : Date.now() });
     });
     token = r.IsTruncated ? r.NextContinuationToken : null;
   } while (token);
