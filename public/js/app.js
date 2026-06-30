@@ -24,32 +24,50 @@
   const AMBER = '#e0a14e';
   const PICKER_CHUNK = 120; // lot d'images chargées par scroll dans la banque d'images
 
-  // Données (catégories)
+  // Données (catégories) — alignées sur l'enum groupId de vorp_inventory/config/groups.lua
   const catMeta = {
-    food:     { label: 'Nourriture', hue: 45 },
-    drink:    { label: 'Boisson',    hue: 205 },
-    alcohol:  { label: 'Alcool',     hue: 28 },
-    weapon:   { label: 'Arme',       hue: 12 },
-    ammo:     { label: 'Munitions',  hue: 62 },
-    medical:  { label: 'Médical',    hue: 155 },
-    material: { label: 'Matériau',   hue: 95 },
-    animal:   { label: 'Ressource',  hue: 35 },
-    misc:     { label: 'Divers',     hue: 285 },
+    food:     { label: 'Provisions',       hue: 45  },
+    medical:  { label: 'Médical',          hue: 155 },
+    material: { label: 'Outils & mat.',    hue: 95  },
+    weapon:   { label: 'Arme',             hue: 12  },
+    ammo:     { label: 'Munitions',        hue: 62  },
+    animal:   { label: 'Ressource animale',hue: 35  },
+    document: { label: 'Document',         hue: 210 },
+    valuable: { label: 'Objet de valeur',  hue: 48  },
+    horse:    { label: 'Cheval',           hue: 28  },
+    herb:     { label: 'Herbe / commerce', hue: 130 },
+    misc:     { label: 'Divers',           hue: 285 },
   };
+  // description du groupe (table item_group) → catégorie sémantique panel.
+  const groupCatByDesc = {
+    default: 'misc', medical: 'medical', foods: 'food', tools: 'material',
+    weapons: 'weapon', ammo: 'ammo', documents: 'document', animals: 'animal',
+    valuables: 'valuable', horse: 'horse', herbs: 'herb',
+  };
+  // Libellé affiché d'un groupe : label FR de la catégorie, repli sur la description brute.
+  function groupLabel(g) {
+    const cat = groupCatByDesc[g.description] || 'misc';
+    return catMeta[cat] ? catMeta[cat].label : g.description;
+  }
+  function groupCat(id) {
+    const g = state.groups.find((x) => Number(x.id) === Number(id));
+    return g ? (groupCatByDesc[g.description] || 'misc') : 'misc';
+  }
 
 
   // Modules (Grades retiré ; Inventaires renommé en Coffres)
   const moduleDef = [
     { key: 'items', label: 'Items', icon: '▦', soon: false, soonTitle: 'Gestion des items', soonDesc: '' },
-    { key: 'jobs', label: 'Jobs', icon: '⚒', soon: true, soonTitle: 'Gestion des jobs', soonDesc: 'Créer, renommer et supprimer les métiers de la table job — salaires, libellés et accès.' },
-    { key: 'players', label: 'Joueurs', icon: '☻', soon: true, soonTitle: 'Gestion des joueurs', soonDesc: 'Rechercher un personnage, consulter argent, identité et historique de jeu.' },
-    { key: 'inventory', label: 'Coffres', icon: '▢', soon: true, soonTitle: 'Gestion des coffres', soonDesc: 'Inspecter les inventaires des joueurs et le contenu des coffres partagés.' },
+    { key: 'jobs', label: 'Jobs', icon: '⚒', soon: true, soonTitle: 'Gestion des jobs', soonDesc: 'Gestion : Créer, renommer et supprimer les jobs, grades, salaires. \n Staff : Liste des jobs, nombre de joueurs dans un job, liste des joueurs qui ont ce job etc...' },
+    { key: 'players', label: 'Joueurs', icon: '☻', soon: true, soonTitle: 'Gestion des joueurs', soonDesc: 'Gestion : Wipe, Gestion inventaire, Gestion argent etc... \b Staff : Rechercher un personnage, consulter son inventaire, historique de connexions, sanctions, job, crew etc...' },
+    { key: 'inventory', label: 'Coffres', icon: '▢', soon: true, soonTitle: 'Gestion des coffres', soonDesc: 'Gestion : Modification des paramètres d\'un coffre, Gestion de l\'inventaire du coffre. Staff : Inspecter les coffres, owner (crew ou joueur) du coffre, derniers logs du coffre etc...' },
   ];
 
   // État
   const state = {
     items: [],
-    query: '', cat: 'all', onlyMissing: false, view: 'list', sort: 'recent',
+    groups: [],
+    query: '', cat: 'all', onlyMissing: false, sort: 'recent',
     draft: null, dropActive: false, module: 'items', nav: 'gallery',
     libraryFiles: [],
     libraryLoading: false,
@@ -60,20 +78,23 @@
     pickerVisibleCount: 120, // rendu progressif — évite 3000+ cartes DOM d'un coup
     r2Stats: null,
     cdnBase: '',
-    publishing: false,
+
     uploading: false,
+    saving: false,
+    devRoOverride: false,
     flash: null,
     authChecked: false,
     user: null,
     access: null, // 'full' | 'readonly' | null
   };
-  function canWrite() { return state.access === 'full'; }
+  const IS_DEV = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  function canWrite() { return !state.devRoOverride && state.access === 'full'; }
   let flashTimer = null;
-  function setFlash(msg) {
-    state.flash = msg;
+  function setFlash(msg, type) {
+    state.flash = { msg, type: type || 'success' };
     render();
     clearTimeout(flashTimer);
-    flashTimer = setTimeout(() => { state.flash = null; render(); }, 2600);
+    flashTimer = setTimeout(() => { state.flash = null; render(); }, 2800);
   }
 
   function decorate(it) {
@@ -95,10 +116,7 @@
       catLabel: catMeta[it.cat] ? catMeta[it.cat].label : 'Divers',
       fileName: `${it.item || 'sans_nom'}.png`,
       imgUrl,
-      noImage: !it.hasImage,
-      tileStyle: imgBg,
       thumbStyle: `width:40px;height:40px;border-radius:8px;${thumbBg}border:${it.hasImage ? '1px solid rgba(236,231,223,0.08)' : '1.5px dashed rgba(224,161,78,0.5)'};`,
-      cornerStyle: sty({ position: 'absolute', top: '9px', left: '9px', fontSize: '10.5px', fontWeight: '600', color: `oklch(0.82 0.06 ${hue})`, background: `color-mix(in oklab, oklch(0.55 0.12 ${hue}) 24%, rgba(0,0,0,0.5))`, border: `1px solid color-mix(in oklab, oklch(0.6 0.12 ${hue}) 30%, transparent)`, padding: '2px 8px', borderRadius: '7px', backdropFilter: 'blur(2px)' }),
       badgePill: sty({ display: 'inline-block', fontSize: '11px', fontWeight: '600', color: `oklch(0.8 0.06 ${hue})`, background: `color-mix(in oklab, oklch(0.6 0.12 ${hue}) 16%, transparent)`, padding: '3px 9px', borderRadius: '7px', width: 'fit-content' }),
     };
   }
@@ -113,7 +131,7 @@
   }
   function openNew() {
     state.dropActive = false;
-    state.draft = { id: null, item: '', label: '', cat: 'misc', type: 'item', limit: 1, weight: 0.5, can_remove: 1, usable: 0, useExpired: 0, groupId: 9, degradation: 0, desc: '', metadata: '{}', hasImage: false, size: 0 };
+    state.draft = { id: null, item: '', label: '', cat: 'misc', limit: 1, weight: 0.5, can_remove: 1, usable: 0, useExpired: 0, groupId: 9, degradation: 0, desc: '', metadata: '{}', hasImage: false, size: 0 };
     render();
   }
   function closeModal() { state.draft = null; render(); }
@@ -128,31 +146,60 @@
     }
     state.items = items;
     state.draft = null;
-    state.publishing = false;
     render();
   }
   function saveDraft() {
     const d = state.draft;
-    if (!d) return;
-    if (!d.pendingFile) { finalizeDraft(d); return; }
-    if (!d.item) { setFlash("Renseigne l'identifiant (item) avant d'enregistrer."); return; }
-    state.publishing = true;
+    if (!d || state.saving) return;
+    if (d.id == null) { setFlash("Création d'item non disponible pour l'instant.", 'error'); return; }
+
+    state.saving = true;
     render();
-    fetch('/api/publish', {
-      method: 'POST',
+
+    const fields = {
+      label: d.label, groupId: Number(d.groupId), limit: Number(d.limit),
+      weight: Number(d.weight), can_remove: Number(d.can_remove),
+      usable: Number(d.usable), useExpired: Number(d.useExpired),
+      degradation: Number(d.degradation), desc: d.desc, metadata: d.metadata,
+    };
+
+    fetch(`/api/items/${encodeURIComponent(d.item)}`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items: [{ item: d.item, file: d.pendingFile }] }),
+      body: JSON.stringify(fields),
     })
-      .then((r) => r.json())
-      .then((data) => {
-        const ok = data.results && data.results.some((r) => r.ok);
-        if (!ok) { state.publishing = false; setFlash('Publication impossible.'); render(); return; }
-        finalizeDraft(Object.assign({}, d, { hasImage: true, pendingFile: null }));
-        setFlash('Image publiée sur R2.');
-        loadStats();
-        loadItems(); // récupère hasImage/size/updatedAt à jour sans recharger la page
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) {
+          state.saving = false;
+          const msg = data.error === 'item_not_found' ? 'Item introuvable en base.'
+            : data.error === 'invalid_group' ? 'Catégorie invalide.'
+            : data.error === 'invalid_metadata' ? 'Metadata : JSON invalide.'
+            : data.error === 'field_too_long' ? `Champ trop long (${data.field}).`
+            : data.error === 'invalid_field' ? `Champ invalide (${data.field}).`
+            : 'Erreur lors de la sauvegarde.';
+          setFlash(msg, 'error');
+          return;
+        }
+        if (!d.pendingFile) {
+          state.saving = false;
+          finalizeDraft(d); setFlash('Modifications enregistrées.'); return;
+        }
+        return fetch('/api/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: [{ item: d.item, file: d.pendingFile }] }),
+        })
+          .then((r) => r.json())
+          .then((pub) => {
+            state.saving = false;
+            const imgOk = pub.results && pub.results.some((r) => r.ok);
+            finalizeDraft(Object.assign({}, d, { hasImage: imgOk || d.hasImage, pendingFile: null }));
+            setFlash(imgOk ? 'Modifications et image enregistrées.' : 'Infos sauvegardées, image non publiée.', imgOk ? 'success' : 'warn');
+            if (imgOk) { loadStats(); loadItems(); }
+          });
       })
-      .catch(() => { state.publishing = false; setFlash('Erreur lors de la publication.'); render(); });
+      .catch(() => { state.saving = false; setFlash('Erreur réseau.', 'error'); });
   }
   function uploadAndAttach(file) {
     if (!state.draft || !file) return;
@@ -170,14 +217,14 @@
           const msg = data.error === 'invalid_file_type' ? 'Seuls les fichiers PNG sont acceptés.'
             : data.error === 'file_too_large' ? 'Fichier trop volumineux (max 8 Mo).'
             : "Échec de l'upload.";
-          setFlash(msg);
+          setFlash(msg, 'error');
           render();
           return;
         }
         if (state.draft) state.draft = Object.assign({}, state.draft, { pendingFile: data.file, hasImage: true, size: Math.round(file.size / 1024) });
         render();
       })
-      .catch(() => { state.uploading = false; setFlash("Échec de l'upload."); render(); });
+      .catch(() => { state.uploading = false; setFlash("Échec de l'upload.", 'error'); render(); });
   }
 
   // Calcul des valeurs de rendu
@@ -221,8 +268,7 @@
       q, inItems, total, onlineCount, missingCount, catCounts, items,
       showGalleryTab, showModuleSoon: !inItems,
       isEmpty: showGalleryTab && items.length === 0,
-      showGrid: showGalleryTab && s.view === 'grid' && items.length > 0,
-      showList: showGalleryTab && s.view === 'list' && items.length > 0,
+      showList: showGalleryTab && items.length > 0,
       curMod: moduleDef.find((m) => m.key === s.module) || moduleDef[0],
       pickerFiles,
     };
@@ -346,6 +392,10 @@
       </div>
       <div style="flex:1;"></div>
       ${rightTools}
+      ${IS_DEV ? (() => {
+        const on = state.devRoOverride;
+        return `<button data-act="togDevRo" title="Simuler lecture seule (dev uniquement)" style="height:30px;padding:0 11px;border-radius:8px;border:1px dashed ${on ? 'rgba(224,161,78,0.6)' : 'rgba(236,231,223,0.2)'};background:${on ? 'rgba(224,161,78,0.1)' : 'transparent'};color:${on ? AMBER : '#756c60'};font-size:11.5px;font-weight:600;cursor:pointer;font-family:inherit;">${on ? '👁 RO actif' : '👁 Sim. RO'}</button>`;
+      })() : ''}
       ${userChip}
     </header>`;
   }
@@ -355,7 +405,7 @@
     var cards = [
       { label: 'Items référencés', value: String(v.total), unit: '', sub: 'total en base', color: '#ece7df' },
       { label: 'Images en ligne', value: String(v.onlineCount), unit: pct + ' %', sub: 'couverture du catalogue', color: GR_LIGHT },
-      { label: 'Images manquantes', value: String(v.missingCount), unit: 'à téléverser', sub: 'priorité file d\'attente', color: v.missingCount > 0 ? AMBER : GR_LIGHT },
+      { label: 'Images manquantes', value: String(v.missingCount), unit: 'à téléverser', color: v.missingCount > 0 ? AMBER : GR_LIGHT },
     ];
     const cells = cards.map((st) => `<div style="background:#1a1712; border:1px solid rgba(236,231,223,0.07); border-radius:13px; padding:16px 18px;">
         <div style="font-size:12.5px; color:#a89f93; margin-bottom:10px;">${esc(st.label)}</div>
@@ -370,9 +420,6 @@
 
   function toolbarHTML(v) {
     const s = state;
-    const seg = (active) => active
-      ? `width:30px; height:28px; border:none; border-radius:6px; cursor:pointer; font-size:14px; background:${BX}; color:#ffe9e6;`
-      : 'width:30px; height:28px; border:none; border-radius:6px; cursor:pointer; font-size:14px; background:transparent; color:#a89f93;';
     const opt = (val, label) => `<option value="${val}" ${s.sort === val ? 'selected' : ''}>${esc(label)}</option>`;
     return `<div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
       <h2 style="margin:0; font-size:18px; font-weight:700; letter-spacing:-0.01em;">${esc(v.galleryTitle)}</h2>
@@ -381,34 +428,7 @@
       <select data-act="sort" style="height:36px; padding:0 30px 0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16 url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22><path d=%22M1 3l4 4 4-4%22 stroke=%22%23a89f93%22 stroke-width=%221.5%22 fill=%22none%22/></svg>') no-repeat right 11px center; color:#ece7df; font-size:13px; cursor:pointer; outline:none;">
         ${opt('recent', 'Récemment modifiés')}${opt('az', 'Nom (A → Z)')}${opt('weight', 'Poids décroissant')}
       </select>
-      <div style="display:flex; background:#211d16; border:1px solid rgba(236,231,223,0.1); border-radius:9px; padding:3px; gap:2px;">
-        <button data-act="view" data-key="list" style="${seg(s.view === 'list')}">≣</button>
-        <button data-act="view" data-key="grid" style="${seg(s.view === 'grid')}">▦</button>
-      </div>
     </div>`;
-  }
-
-  function gridHTML(v) {
-    const cards = v.items.map((it) => {
-      const imgArea = it.hasImage && it.imgUrl
-        ? `<div style="position:absolute;inset:0;background:#16130f;display:flex;align-items:center;justify-content:center;">
-            <img src="${it.imgUrl}" alt="${esc(it.label)}" style="width:100%;height:100%;object-fit:contain;display:block;" loading="lazy" />
-            <span style="position:absolute;bottom:8px;left:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(236,231,223,0.62);background:rgba(0,0,0,0.34);padding:3px 7px;border-radius:6px;backdrop-filter:blur(2px);">${esc(it.fileName)}</span>
-          </div>`
-        : `<div style="position:absolute;inset:9px;border:1.5px dashed rgba(224,161,78,0.5);border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:rgba(224,161,78,0.05);"><span style="font-size:21px;opacity:.8;">⚠</span><span style="font-size:11px;color:${AMBER};font-weight:600;">image manquante</span></div>`;
-      return `<div class="item-card" data-act="openItem" data-id="${it.id}" style="background:#211d16; border:1px solid rgba(236,231,223,0.08); border-radius:12px; overflow:hidden; cursor:pointer;">
-        <div style="position:relative; aspect-ratio:1/1; background:#16130f;">${imgArea}<span style="${it.cornerStyle}">${esc(it.catLabel)}</span></div>
-        <div style="padding:11px 12px 12px;">
-          <div style="font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</div>
-          <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#756c60; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.item)}</div>
-          <div style="display:flex; align-items:center; justify-content:space-between; margin-top:11px;">
-            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#a89f93;">#${it.id}</span>
-            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; color:#756c60;">${esc(it.sizeText)}</span>
-          </div>
-        </div>
-      </div>`;
-    }).join('');
-    return `<div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:16px;">${cards}</div>`;
   }
 
   function listHTML(v) {
@@ -441,7 +461,7 @@
       <div style="font-size:20px; font-weight:700; letter-spacing:-0.01em;">${esc(m.soonTitle)}</div>
       <div style="font-size:13.5px; color:#756c60; margin-top:8px; max-width:420px; line-height:1.6;">${esc(m.soonDesc)}</div>
       <div style="display:inline-flex; align-items:center; gap:8px; margin-top:22px; font-size:12.5px; color:#a89f93; background:#1a1712; border:1px solid rgba(236,231,223,0.08); padding:8px 15px; border-radius:10px;">
-        <span style="width:7px; height:7px; border-radius:50%; background:${AMBER};"></span> Prévu dans une prochaine itération
+        <span style="width:7px; height:7px; border-radius:50%; background:${AMBER};"></span> Prévu dans une prochaine mise à jour !
       </div>
     </div>`;
   }
@@ -470,11 +490,13 @@
       const type = opts.type || 'text';
       const step = opts.step ? `step="${opts.step}"` : '';
       const fs = opts.fs || '14px';
-      return `<input id="drf-${key}" data-act="setDraft" data-key="${key}" type="${type}" ${step} ${ro ? 'readonly' : ''} value="${esc(d[key])}" style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:${fs}; ${mono} outline:none; ${ro ? 'opacity:.7;cursor:default;' : ''}" />`;
+      const isRo = ro || !!opts.forceRo;
+      const isBlocked = !!opts.forceRo;
+      return `<input id="drf-${key}" data-act="setDraft" data-key="${key}" type="${type}" ${step} ${isRo ? 'readonly' : ''} value="${esc(d[key])}" style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:${fs}; ${mono} outline:none; ${isRo ? 'opacity:.7;' : ''}${isBlocked ? 'cursor:not-allowed;' : isRo ? 'cursor:default;' : ''}" />`;
     };
     const lbl = (t) => `<label style="display:block; font-size:11.5px; font-weight:600; color:#a89f93; margin-bottom:6px;">${esc(t)}</label>`;
-    const catOpts = Object.keys(catMeta).map((k) => `<option value="${k}" ${d.cat === k ? 'selected' : ''}>${esc(catMeta[k].label)}</option>`).join('');
-    const typeOpts = ['item', 'weapon'].map((t) => `<option value="${t}" ${d.type === t ? 'selected' : ''}>${t}</option>`).join('');
+    const groupIdOpts = state.groups.map((g) => `<option value="${g.id}" ${Number(d.groupId) === Number(g.id) ? 'selected' : ''}>${esc(groupLabel(g))}</option>`).join('');
+
 
     const toggles = [['can_remove', 'Peut être jeté'], ['usable', 'Utilisable'], ['useExpired', 'Utilisable périmé']].map(([key, label]) => {
       const on = !!+d[key];
@@ -514,12 +536,10 @@
           <div style="padding:22px; overflow-y:auto;">
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
               <div style="grid-column:span 2;">${lbl('Label affiché')}${fieldInp('label')}</div>
-              <div>${lbl('Identifiant (item)')}${fieldInp('item', { mono: true, fs: '13px' })}</div>
-              <div>${lbl('Catégorie')}<select data-act="setDraft" data-key="cat" ${ro ? 'disabled' : ''} style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${catOpts}</select></div>
-              <div>${lbl('Type (VORP)')}<select data-act="setDraft" data-key="type" ${ro ? 'disabled' : ''} style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${typeOpts}</select></div>
+              <div>${lbl('Identifiant (item)')}${fieldInp('item', { mono: true, fs: '13px', forceRo: true })}</div>
+              <div>${lbl('Catégorie')}<select data-act="setDraft" data-key="groupId" ${ro ? 'disabled' : ''} style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${groupIdOpts}</select></div>
               <div>${lbl('Limite (stack)')}${fieldInp('limit', { type: 'number', mono: true })}</div>
               <div>${lbl('Poids (weight)')}${fieldInp('weight', { type: 'number', step: '0.01', mono: true })}</div>
-              <div>${lbl('groupId')}${fieldInp('groupId', { type: 'number', mono: true })}</div>
               <div>${lbl('Dégradation (jours)')}${fieldInp('degradation', { type: 'number', mono: true })}</div>
               <div style="grid-column:span 2; display:flex; flex-wrap:wrap; gap:10px; margin-top:2px;">${toggles}</div>
               <div style="grid-column:span 2;">${lbl('Description (desc)')}<textarea id="drf-desc" data-act="setDraft" data-key="desc" rows="2" ${ro ? 'readonly' : ''} style="width:100%; padding:10px 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; line-height:1.5; outline:none;">${esc(d.desc)}</textarea></div>
@@ -531,7 +551,11 @@
           <span style="font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#756c60;">${esc(draftPath)}</span>
           <div style="flex:1;"></div>
           <button data-act="closeModal" style="height:40px; padding:0 18px; border-radius:10px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:13.5px; cursor:pointer;">${ro ? 'Fermer' : 'Annuler'}</button>
-          ${ro ? '' : `<button data-act="saveDraft" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);">${esc(saveLabel)}</button>`}
+          ${ro ? '' : (() => {
+            const sv = state.saving;
+            const spinner = `<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(0,0,0,0.25);border-top-color:${ON_GR};border-radius:50%;animation:spinBtn .7s linear infinite;vertical-align:middle;"></span>`;
+            return `<button data-act="saveDraft" style="height:40px; padding:0 22px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:${sv ? 'not-allowed' : 'pointer'}; opacity:${sv ? '0.75' : '1'}; box-shadow:0 4px 14px rgba(${GR_RGB},0.25); display:inline-flex; align-items:center; gap:8px;">${sv ? spinner : ''}${sv ? 'Enregistrement…' : esc(saveLabel)}</button>`;
+          })()}
         </div>
       </div>
     </div>`;
@@ -604,7 +628,6 @@
     if (v.showModuleSoon) return moduleSoonHTML(v);
     let body = statsHTML(v) + toolbarHTML(v);
     if (v.isEmpty) body += emptyHTML();
-    else if (v.showGrid) body += gridHTML(v);
     else if (v.showList) body += listHTML(v);
     return body;
   }
@@ -655,22 +678,18 @@
     _modalWasOpen = !!state.draft;
     const pickerJustOpened = state.pickerOpen && !_pickerWasOpen;
     _pickerWasOpen = state.pickerOpen;
-    const busyTitle = state.uploading ? 'Téléversement en cours…' : 'Publication en cours…';
-    const busySub = state.uploading ? "Envoi de l'image vers la bibliothèque" : 'Envoi des images vers Cloudflare R2';
-    const publishingOverlay = (state.publishing || state.uploading) ? `
-      <div style="position:fixed;inset:0;background:rgba(8,6,4,0.75);backdrop-filter:blur(4px);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;animation:fadeIn .15s ease;">
-        <div style="display:flex;gap:6px;">${[0,1,2].map((i) => `<div style="width:10px;height:10px;border-radius:50%;background:${BX_LIGHT};animation:bounce .9s ease-in-out ${i*0.18}s infinite alternate;"></div>`).join('')}</div>
-        <div style="font-size:15px;font-weight:600;color:#ece7df;letter-spacing:0.01em;">${busyTitle}</div>
-        <div style="font-size:12px;color:#756c60;">${busySub}</div>
-      </div>` : '';
-    root.innerHTML = `<style>@keyframes bounce{from{transform:translateY(0)}to{transform:translateY(-10px)}}</style>
+    const f = state.flash;
+    const toastBg   = f && f.type === 'error' ? '#c0392b' : f && f.type === 'warn' ? '#b8860b' : GR;
+    const toastText = f && f.type === 'error' ? '#fff'    : f && f.type === 'warn' ? '#fff'    : ON_GR;
+    const toastHTML = f ? `<div style="position:fixed;bottom:24px;right:24px;z-index:300;padding:11px 20px;border-radius:10px;background:${toastBg};color:${toastText};font-weight:600;font-size:13.5px;box-shadow:0 4px 20px rgba(0,0,0,0.35);animation:slideInToast .2s ease;pointer-events:none;">${esc(f.msg)}</div>` : '';
+    root.innerHTML = `<style>@keyframes slideInToast{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}@keyframes spinBtn{to{transform:rotate(360deg)}}</style>
       <div style="display:flex; height:100vh; width:100%; overflow:hidden;">
         ${sidebarHTML(v)}
         <main style="flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden;">
           ${headerHTML(v)}
           <div data-scroll style="flex:1; overflow-y:auto; padding:24px 24px 48px;">${contentHTML(v)}</div>
         </main>
-      </div>${modalHTML(modalJustOpened)}${pickerModalHTML(pickerJustOpened)}${publishingOverlay}`;
+      </div>${modalHTML(modalJustOpened)}${pickerModalHTML(pickerJustOpened)}${toastHTML}`;
     restoreFocus(cap);
     const newScrollEl = root.querySelector('[data-scroll]');
     if (newScrollEl && scrollTop) newScrollEl.scrollTop = scrollTop;
@@ -690,6 +709,7 @@
     const key = el.dataset.key;
     if (WRITE_ACTIONS.has(act) && !canWrite()) return; // garde-fou — l'UI masque déjà ces actions
     switch (act) {
+      case 'togDevRo': if (IS_DEV) { state.devRoOverride = !state.devRoOverride; render(); } break;
       case 'logout':
         fetch('/auth/logout', { method: 'POST' }).then(() => { window.location.href = '/'; });
         break;
@@ -698,7 +718,6 @@
       case 'clearQuery': state.query = ''; render(); break;
       case 'toggleMissing': state.onlyMissing = !state.onlyMissing; render(); break;
       case 'openNew': openNew(); break;
-      case 'view': state.view = key; render(); break;
       case 'openItem': openItem(+el.dataset.id); break;
       case 'closeModal': closeModal(); break;
       case 'stop': e.stopPropagation(); break;
@@ -742,7 +761,11 @@
     if (act === 'pickerQuery') { state.pickerQuery = val; state.pickerVisibleCount = PICKER_CHUNK; render(); }
     else if (act === 'query') { state.query = val; render(); }
     else if (act === 'sort') { state.sort = val; render(); }
-    else if (act === 'setDraft' && state.draft) { state.draft = Object.assign({}, state.draft, { [key]: val }); }
+    else if (act === 'setDraft' && state.draft) {
+      const update = { [key]: val };
+      if (key === 'groupId') update.cat = groupCat(val);
+      state.draft = Object.assign({}, state.draft, update);
+    }
   }
   root.addEventListener('input', onValueChange);
   root.addEventListener('change', onValueChange);
@@ -811,6 +834,13 @@
       .catch(() => {});
   }
 
+  function loadGroups() {
+    fetch('/api/groups')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((data) => { if (Array.isArray(data)) { state.groups = data; render(); } })
+      .catch(() => {});
+  }
+
   function loadLibrary() {
     if (state.libraryLoading) return;
     state.libraryLoading = true;
@@ -839,6 +869,7 @@
         state.authChecked = true;
         render();
         loadConfig();
+        loadGroups();
         loadItems();
         loadLibrary();
         loadStats();

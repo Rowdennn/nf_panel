@@ -6,7 +6,6 @@ const express = require('express');
 const cookieSession = require('cookie-session');
 const multer = require('multer');
 const db = require('./db');
-const { match } = require('./matcher');
 const r2 = require('./r2');
 const auth = require('./auth');
 
@@ -17,6 +16,25 @@ function refreshR2Cache() {
   r2.listItemNames().then((map) => { r2Cache = map; }).catch(() => {});
 }
 refreshR2Cache();
+
+// Catégorie sémantique (couleur/label panel) dérivée de la description du groupe
+// dans item_group — la table porte la contrainte FK de items.groupId.
+const DESC_CAT = {
+  default: 'misc', medical: 'medical', foods: 'food', tools: 'material',
+  weapons: 'weapon', ammo: 'ammo', documents: 'document', animals: 'animal',
+  valuables: 'valuable', horse: 'horse', herbs: 'herb',
+};
+// Cache des groupes valides — id → { description, cat }. Rafraîchi au démarrage.
+let groupCache = new Map();
+function refreshGroups() {
+  if (!db.isConfigured()) return;
+  db.fetchGroups().then((rows) => {
+    const m = new Map();
+    for (const g of rows) m.set(Number(g.id), { description: g.description, cat: DESC_CAT[g.description] || 'misc' });
+    groupCache = m;
+  }).catch(() => {});
+}
+refreshGroups();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -119,13 +137,16 @@ function requireWrite(req, res, next) {
 }
 app.use('/api', requireAuth);
 
-// VORP ne stocke pas cat/poids/groupId/metadata : défauts + cat devinée du nom/type.
 function mapItem(row, i) {
   const item = row.item || '';
   const type = row.type || 'item';
-  let cat = 'misc';
-  if (type === 'weapon' || /^weapon_/i.test(item)) cat = 'weapon';
-  else if (/^ammo_/i.test(item)) cat = 'ammo';
+  const groupId = row.groupId != null ? Number(row.groupId) : 0;
+  const grp = groupCache.get(groupId);
+  let cat = grp ? grp.cat : 'misc';
+  if (cat === 'misc') {
+    if (type === 'weapon' || /^weapon_/i.test(item)) cat = 'weapon';
+    else if (/^ammo_/i.test(item)) cat = 'ammo';
+  }
   return {
     id: i + 1,
     item,
@@ -144,9 +165,14 @@ function mapItem(row, i) {
     hasImage: false, // calculé étape 2 (matching R2)
     size: 0,
     updatedAt: 0, // cache-buster pour l'URL CDN
-    dims: '—',
   };
 }
+
+// Groupes valides (item_group) pour le sélecteur de catégorie du modal.
+app.get('/api/groups', (_req, res) => {
+  const groups = [...groupCache.entries()].map(([id, g]) => ({ id, description: g.description, cat: g.cat }));
+  res.json(groups);
+});
 
 app.get('/api/items', async (_req, res) => {
   if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
@@ -235,35 +261,6 @@ app.post('/api/upload', requireWrite, (req, res) => {
   });
 });
 
-// Matching flou : pour chaque item, propose les meilleurs candidats image.
-// Retourne aussi hasImage=true si <item>.png existe exactement dans la bibliothèque.
-app.get('/api/match', async (_req, res) => {
-  if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
-  try {
-    const rows = await db.fetchItems();
-    const files = libraryFiles();
-
-    const result = rows.map((row) => {
-      const hasImage = r2Cache.has(row.item.toLowerCase()); // dans /api/match
-      if (hasImage) return { item: row.item, label: row.label, hasImage, candidates: [] };
-      // tente le match sur le label ET sur le nom technique, garde le meilleur score
-      const byLabel = match(row.label, files);
-      const byItem  = match(row.item,  files);
-      const merged = Object.values(
-        [...byLabel, ...byItem].reduce((acc, c) => {
-          if (!acc[c.file] || acc[c.file].score < c.score) acc[c.file] = c;
-          return acc;
-        }, {})
-      ).sort((a, b) => b.score - a.score).slice(0, 5);
-      return { item: row.item, label: row.label, hasImage, candidates: merged };
-    });
-
-    res.json(result);
-  } catch (e) {
-    console.error('[/api/match]', e.code || e.message);
-    res.status(500).json({ error: 'db_error', code: e.code || null });
-  }
-});
 
 // Stats du bucket R2 (prefix items/)
 app.get('/api/stats', async (_req, res) => {
@@ -307,6 +304,52 @@ app.post('/api/publish', requireWrite, async (req, res) => {
 
   const failed = results.filter((r) => !r.ok);
   res.status(failed.length && failed.length === results.length ? 500 : 200).json({ results, failed: failed.length });
+});
+
+// Met à jour les métadonnées d'un item existant (ne touche pas à l'identifiant ni au type).
+app.patch('/api/items/:item', requireWrite, async (req, res) => {
+  if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
+  const itemName = req.params.item;
+  if (!/^[a-zA-Z0-9_-]+$/.test(itemName)) return res.status(400).json({ error: 'invalid_item_name' });
+
+  const ALLOWED = ['label', 'groupId', 'limit', 'weight', 'can_remove', 'usable', 'useExpired', 'degradation', 'desc', 'metadata'];
+  const fields = {};
+  for (const k of ALLOWED) { if (k in req.body) fields[k] = req.body[k]; }
+  if (!Object.keys(fields).length) return res.status(400).json({ error: 'no_fields' });
+
+  // Entiers : repli sur 0 si non parsable (null, [], chaîne non numérique…).
+  for (const k of ['groupId', 'limit', 'can_remove', 'usable', 'useExpired', 'degradation']) {
+    if (k in fields) { const n = parseInt(fields[k], 10); fields[k] = Number.isFinite(n) ? n : 0; }
+  }
+  if ('weight' in fields) { const w = parseFloat(fields.weight); fields.weight = Number.isFinite(w) ? w : 0; }
+
+  // groupId doit exister dans item_group (sinon échec de contrainte FK en base).
+  if ('groupId' in fields && groupCache.size && !groupCache.has(fields.groupId)) {
+    return res.status(400).json({ error: 'invalid_group' });
+  }
+
+  // Champs texte : type + longueur bornée (évite erreurs DB et stockage abusif).
+  const MAX = { label: 100, desc: 1000, metadata: 4000 };
+  for (const k of ['label', 'desc', 'metadata']) {
+    if (k in fields) {
+      if (typeof fields[k] !== 'string') return res.status(400).json({ error: 'invalid_field', field: k });
+      if (fields[k].length > MAX[k]) return res.status(400).json({ error: 'field_too_long', field: k });
+    }
+  }
+  // metadata doit rester du JSON valide (consommé par json.decode côté VORP).
+  if ('metadata' in fields) {
+    try { JSON.parse(fields.metadata); }
+    catch { return res.status(400).json({ error: 'invalid_metadata' }); }
+  }
+
+  try {
+    const affected = await db.updateItem(itemName, fields);
+    if (!affected) return res.status(404).json({ error: 'item_not_found' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[PATCH /api/items]', itemName, e.message);
+    res.status(500).json({ error: 'db_error', code: e.code || null });
+  }
 });
 
 const listenHost = isProd ? '127.0.0.1' : undefined;
