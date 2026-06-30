@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
 
@@ -46,14 +46,6 @@ async function uploadItem(itemName, sourceFile, libraryPath) {
   return { key, sizeBytes: body.length };
 }
 
-// Vérifie si items/<item>.png existe déjà dans R2.
-async function exists(itemName) {
-  try {
-    await client().send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET, Key: `items/${itemName}.png` }));
-    return true;
-  } catch { return false; }
-}
-
 // Retourne un Map nom→{sizeBytes, mtime} des items présents dans R2.
 // mtime sert de cache-buster (?v=mtime) pour forcer le rechargement après remplacement.
 async function listItemNames() {
@@ -72,4 +64,4 @@ async function listItemNames() {
   return map;
 }
 
-module.exports = { isConfigured, uploadItem, exists, listItemNames };
+module.exports = { isConfigured, uploadItem, listItemNames };
