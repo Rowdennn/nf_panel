@@ -361,7 +361,7 @@
       ? `display:flex; align-items:center; gap:8px; height:40px; padding:0 14px; border-radius:10px; border:1px solid rgba(224,161,78,0.45); background:rgba(224,161,78,0.13); color:${AMBER}; font-weight:600; font-size:13px; cursor:pointer;`
       : 'display:flex; align-items:center; gap:8px; height:40px; padding:0 14px; border-radius:10px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#a89f93; font-weight:600; font-size:13px; cursor:pointer;';
     const importBtn = canWrite()
-      ? `<button data-act="openNew" style="display:flex; align-items:center; gap:8px; height:40px; padding:0 17px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);"><span style="font-size:17px; line-height:1; margin-top:-1px;">＋</span> Importer un item</button>`
+      ? `<button data-act="openNew" style="display:flex; align-items:center; gap:8px; height:40px; padding:0 17px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);"><span style="font-size:17px; line-height:1; margin-top:-1px;">＋</span> Créer un item</button>`
       : '';
     const rightTools = v.showGalleryTab
       ? `<div style="display:flex; align-items:center; gap:16px;">
@@ -536,7 +536,7 @@
           <div style="padding:22px; overflow-y:auto;">
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px;">
               <div style="grid-column:span 2;">${lbl('Label affiché')}${fieldInp('label')}</div>
-              <div>${lbl('Identifiant (item)')}${fieldInp('item', { mono: true, fs: '13px', forceRo: true })}</div>
+              <div>${lbl('Identifiant (item)')}${fieldInp('item', { mono: true, fs: '13px', forceRo: d.id != null })}</div>
               <div>${lbl('Catégorie')}<select data-act="setDraft" data-key="groupId" ${ro ? 'disabled' : ''} style="width:100%; height:40px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; outline:none; cursor:pointer;">${groupIdOpts}</select></div>
               <div>${lbl('Limite (stack)')}${fieldInp('limit', { type: 'number', mono: true })}</div>
               <div>${lbl('Poids (weight)')}${fieldInp('weight', { type: 'number', step: '0.01', mono: true })}</div>
