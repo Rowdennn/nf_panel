@@ -8,6 +8,7 @@ const multer = require('multer');
 const db = require('./db');
 const r2 = require('./r2');
 const auth = require('./auth');
+const bridge = require('./bridge');
 
 // Cache de la liste R2 — rafraîchi au démarrage et après chaque publish.
 let r2Cache = new Map(); // nom → { sizeBytes, mtime }
@@ -296,6 +297,11 @@ app.post('/api/publish', requireWrite, async (req, res) => {
       const { key, sizeBytes } = await r2.uploadItem(item, file, libraryPath);
       r2Cache.set(item.toLowerCase(), { sizeBytes, mtime: Date.now() });
       results.push({ item, ok: true, key });
+      // Best-effort : pousse la nouvelle image aux joueurs déjà connectés
+      // (voir bridge.js) sans bloquer la réponse en cas d'échec.
+      if (bridge.isConfigured()) {
+        bridge.bumpImageVersion(item).catch((e) => console.error('[bridge bumpImageVersion]', item, e.message));
+      }
     } catch (e) {
       console.error('[/api/publish]', item, e.message);
       results.push({ item, ok: false, error: e.message });
@@ -306,16 +312,11 @@ app.post('/api/publish', requireWrite, async (req, res) => {
   res.status(failed.length && failed.length === results.length ? 500 : 200).json({ results, failed: failed.length });
 });
 
-// Met à jour les métadonnées d'un item existant (ne touche pas à l'identifiant ni au type).
-app.patch('/api/items/:item', requireWrite, async (req, res) => {
-  if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
-  const itemName = req.params.item;
-  if (!/^[a-zA-Z0-9_-]+$/.test(itemName)) return res.status(400).json({ error: 'invalid_item_name' });
-
-  const ALLOWED = ['label', 'groupId', 'limit', 'weight', 'can_remove', 'usable', 'useExpired', 'degradation', 'desc', 'metadata'];
+// Champs partagés par la création et la mise à jour d'un item — validation identique.
+const ITEM_FIELDS = ['label', 'groupId', 'limit', 'weight', 'can_remove', 'usable', 'useExpired', 'degradation', 'desc', 'metadata'];
+function readItemFields(body) {
   const fields = {};
-  for (const k of ALLOWED) { if (k in req.body) fields[k] = req.body[k]; }
-  if (!Object.keys(fields).length) return res.status(400).json({ error: 'no_fields' });
+  for (const k of ITEM_FIELDS) { if (k in body) fields[k] = body[k]; }
 
   // Entiers : repli sur 0 si non parsable (null, [], chaîne non numérique…).
   for (const k of ['groupId', 'limit', 'can_remove', 'usable', 'useExpired', 'degradation']) {
@@ -323,33 +324,101 @@ app.patch('/api/items/:item', requireWrite, async (req, res) => {
   }
   if ('weight' in fields) { const w = parseFloat(fields.weight); fields.weight = Number.isFinite(w) ? w : 0; }
 
+  return fields;
+}
+// Retourne un code d'erreur si un champ est invalide, sinon null.
+function validateItemFields(fields) {
   // groupId doit exister dans item_group (sinon échec de contrainte FK en base).
   if ('groupId' in fields && groupCache.size && !groupCache.has(fields.groupId)) {
-    return res.status(400).json({ error: 'invalid_group' });
+    return { error: 'invalid_group' };
   }
-
   // Champs texte : type + longueur bornée (évite erreurs DB et stockage abusif).
   const MAX = { label: 100, desc: 1000, metadata: 4000 };
   for (const k of ['label', 'desc', 'metadata']) {
     if (k in fields) {
-      if (typeof fields[k] !== 'string') return res.status(400).json({ error: 'invalid_field', field: k });
-      if (fields[k].length > MAX[k]) return res.status(400).json({ error: 'field_too_long', field: k });
+      if (typeof fields[k] !== 'string') return { error: 'invalid_field', field: k };
+      if (fields[k].length > MAX[k]) return { error: 'field_too_long', field: k };
     }
   }
   // metadata doit rester du JSON valide (consommé par json.decode côté VORP).
   if ('metadata' in fields) {
     try { JSON.parse(fields.metadata); }
-    catch { return res.status(400).json({ error: 'invalid_metadata' }); }
+    catch { return { error: 'invalid_metadata' }; }
   }
+  return null;
+}
+
+// Crée un nouvel item.
+app.post('/api/items/:item', requireWrite, async (req, res) => {
+  if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
+  const itemName = req.params.item;
+  if (!itemName || !/^[a-zA-Z0-9_-]+$/.test(itemName) || itemName.length > 50) {
+    return res.status(400).json({ error: 'invalid_item_name' });
+  }
+
+  const fields = readItemFields(req.body);
+  if (!fields.label) return res.status(400).json({ error: 'invalid_field', field: 'label' });
+
+  const err = validateItemFields(fields);
+  if (err) return res.status(400).json(err);
+
+  try {
+    await db.createItem(itemName, fields);
+  } catch (e) {
+    if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'item_exists' });
+    console.error('[POST /api/items]', itemName, e.message);
+    return res.status(500).json({ error: 'db_error', code: e.code || null });
+  }
+
+  // Recharge le cache ServerItems du serveur de jeu (vorp_inventory) sans
+  // redémarrage — best-effort : l'item reste créé en DB même si le serveur
+  // de jeu est down ou le pont mal configuré.
+  let liveReload = false;
+  if (bridge.isConfigured()) {
+    try {
+      await bridge.reloadItem(itemName);
+      liveReload = true;
+    } catch (e) {
+      console.error('[bridge reloadItem]', itemName, e.message);
+    }
+  }
+
+  res.status(201).json({ ok: true, item: itemName, liveReload });
+});
+
+// Met à jour les métadonnées d'un item existant (ne touche pas à l'identifiant ni au type).
+app.patch('/api/items/:item', requireWrite, async (req, res) => {
+  if (!db.isConfigured()) return res.status(503).json({ error: 'db_not_configured' });
+  const itemName = req.params.item;
+  if (!/^[a-zA-Z0-9_-]+$/.test(itemName)) return res.status(400).json({ error: 'invalid_item_name' });
+
+  const fields = readItemFields(req.body);
+  if (!Object.keys(fields).length) return res.status(400).json({ error: 'no_fields' });
+
+  const err = validateItemFields(fields);
+  if (err) return res.status(400).json(err);
 
   try {
     const affected = await db.updateItem(itemName, fields);
     if (!affected) return res.status(404).json({ error: 'item_not_found' });
-    res.json({ ok: true });
   } catch (e) {
     console.error('[PATCH /api/items]', itemName, e.message);
-    res.status(500).json({ error: 'db_error', code: e.code || null });
+    return res.status(500).json({ error: 'db_error', code: e.code || null });
   }
+
+  // Recharge le cache ServerItems du serveur de jeu — best-effort, comme
+  // pour la création (voir POST /api/items/:item juste au-dessus).
+  let liveReload = false;
+  if (bridge.isConfigured()) {
+    try {
+      await bridge.reloadItem(itemName);
+      liveReload = true;
+    } catch (e) {
+      console.error('[bridge reloadItem]', itemName, e.message);
+    }
+  }
+
+  res.json({ ok: true, liveReload });
 });
 
 const listenHost = isProd ? '127.0.0.1' : undefined;

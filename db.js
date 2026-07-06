@@ -56,4 +56,17 @@ async function updateItem(itemName, fields) {
   return result.affectedRows;
 }
 
-module.exports = { isConfigured, fetchItems, fetchGroups, updateItem, getPool };
+async function createItem(itemName, fields) {
+  const entries = Object.entries(fields).filter(([k]) => UPDATABLE_COLS.has(k));
+  const cols = ['item', ...entries.map(([k]) => k)];
+  const values = [itemName, ...entries.map(([, v]) => v)];
+  const placeholders = cols.map(() => '?').join(', ');
+  const colList = cols.map((c) => `\`${c}\``).join(', ');
+  const [result] = await getPool().execute(
+    `INSERT INTO \`${itemsTable()}\` (${colList}) VALUES (${placeholders})`,
+    values
+  );
+  return result.insertId;
+}
+
+module.exports = { isConfigured, fetchItems, fetchGroups, updateItem, createItem, getPool };

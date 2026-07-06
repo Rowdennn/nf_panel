@@ -151,7 +151,15 @@
   function saveDraft() {
     const d = state.draft;
     if (!d || state.saving) return;
-    if (d.id == null) { setFlash("Création d'item non disponible pour l'instant.", 'error'); return; }
+    const isCreate = d.id == null;
+
+    if (isCreate) {
+      const item = (d.item || '').trim();
+      if (!item) { setFlash("L'identifiant (item) est requis.", 'error'); return; }
+      if (!/^[a-zA-Z0-9_-]+$/.test(item) || item.length > 50) { setFlash('Identifiant invalide (lettres, chiffres, _ et - uniquement, 50 caractères max).', 'error'); return; }
+      if (!(d.label || '').trim()) { setFlash('Le label affiché est requis.', 'error'); return; }
+      d.item = item;
+    }
 
     state.saving = true;
     render();
@@ -164,7 +172,7 @@
     };
 
     fetch(`/api/items/${encodeURIComponent(d.item)}`, {
-      method: 'PATCH',
+      method: isCreate ? 'POST' : 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(fields),
     })
@@ -173,6 +181,8 @@
         if (!ok) {
           state.saving = false;
           const msg = data.error === 'item_not_found' ? 'Item introuvable en base.'
+            : data.error === 'item_exists' ? 'Cet identifiant existe déjà.'
+            : data.error === 'invalid_item_name' ? 'Identifiant invalide.'
             : data.error === 'invalid_group' ? 'Catégorie invalide.'
             : data.error === 'invalid_metadata' ? 'Metadata : JSON invalide.'
             : data.error === 'field_too_long' ? `Champ trop long (${data.field}).`
@@ -183,7 +193,15 @@
         }
         if (!d.pendingFile) {
           state.saving = false;
-          finalizeDraft(d); setFlash('Modifications enregistrées.'); return;
+          if (isCreate) {
+            state.draft = null;
+            setFlash(data.liveReload ? 'Item créé et actif en jeu.' : 'Item créé (redémarrage ou reload manuel du serveur de jeu requis).', data.liveReload ? 'success' : 'warn');
+            loadItems();
+          } else {
+            finalizeDraft(d);
+            setFlash(data.liveReload ? 'Modifications enregistrées et actives en jeu.' : 'Modifications enregistrées (reload manuel du serveur de jeu requis).', data.liveReload ? 'success' : 'warn');
+          }
+          return;
         }
         return fetch('/api/publish', {
           method: 'POST',
@@ -194,9 +212,17 @@
           .then((pub) => {
             state.saving = false;
             const imgOk = pub.results && pub.results.some((r) => r.ok);
-            finalizeDraft(Object.assign({}, d, { hasImage: imgOk || d.hasImage, pendingFile: null }));
-            setFlash(imgOk ? 'Modifications et image enregistrées.' : 'Infos sauvegardées, image non publiée.', imgOk ? 'success' : 'warn');
-            if (imgOk) { loadStats(); loadItems(); }
+            if (isCreate) {
+              state.draft = null;
+              const liveTxt = data.liveReload ? 'actif en jeu' : 'reload manuel requis';
+              setFlash(imgOk ? `Item et image créés (${liveTxt}).` : `Item créé, image non publiée (${liveTxt}).`, imgOk && data.liveReload ? 'success' : 'warn');
+              loadStats(); loadItems();
+            } else {
+              finalizeDraft(Object.assign({}, d, { hasImage: imgOk || d.hasImage, pendingFile: null }));
+              const liveTxt = data.liveReload ? 'actif en jeu' : 'reload manuel requis';
+              setFlash(imgOk ? `Modifications et image enregistrées (${liveTxt}).` : `Infos sauvegardées, image non publiée (${liveTxt}).`, imgOk && data.liveReload ? 'success' : 'warn');
+              if (imgOk) { loadStats(); loadItems(); }
+            }
           });
       })
       .catch(() => { state.saving = false; setFlash('Erreur réseau.', 'error'); });
