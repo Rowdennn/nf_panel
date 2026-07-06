@@ -67,7 +67,7 @@
   const state = {
     items: [],
     groups: [],
-    query: '', cat: 'all', onlyMissing: false, sort: 'recent',
+    query: '', cat: 'all', onlyMissing: false, sortCol: 'label', sortDir: 'asc',
     draft: null, dropActive: false, module: 'items', nav: 'gallery',
     libraryFiles: [],
     libraryLoading: false,
@@ -123,6 +123,7 @@
 
   // Actions
   function openItem(id) {
+    if (!canWrite()) return;
     const it = state.items.find((i) => i.id === id);
     if (!it) return;
     state.draft = Object.assign({}, it);
@@ -265,8 +266,18 @@
       if (q && !(it.label.toLowerCase().includes(q) || it.item.toLowerCase().includes(q))) return false;
       return true;
     });
-    if (s.sort === 'az') list = list.slice().sort((a, b) => a.label.localeCompare(b.label));
-    else if (s.sort === 'weight') list = list.slice().sort((a, b) => b.weight - a.weight);
+    if (s.sortCol) {
+      const dir = s.sortDir === 'desc' ? -1 : 1;
+      const cmp = {
+        label: (a, b) => a.label.localeCompare(b.label),
+        item: (a, b) => a.item.localeCompare(b.item),
+        cat: (a, b) => (catMeta[a.cat] ? catMeta[a.cat].label : a.cat).localeCompare(catMeta[b.cat] ? catMeta[b.cat].label : b.cat),
+        type: (a, b) => String(a.type).localeCompare(String(b.type)),
+        weight: (a, b) => a.weight - b.weight,
+        status: (a, b) => Number(a.hasImage) - Number(b.hasImage),
+      }[s.sortCol];
+      if (cmp) list = list.slice().sort((a, b) => cmp(a, b) * dir);
+    }
 
     const items = list.map((it) => {
       const d = decorate(it);
@@ -366,7 +377,7 @@
         </div>
         <div style="line-height:1.1;">
           <div style="font-weight:800; font-size:16px; letter-spacing:-0.01em;">NFR PANEL</div>
-          <div style="font-size:11px; color:#756c60; font-family:'JetBrains Mono',monospace; margin-top:2px;">administration serveur</div>
+          <div style="font-size:11px; color:#756c60; font-family:'JetBrains Mono',monospace; margin-top:2px;">${canWrite() ? 'administration serveur' : 'wiki staff'}</div>
         </div>
       </div>
       <div style="padding:14px 18px 7px; font-size:10.5px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:#756c60;">Modules</div>
@@ -389,18 +400,17 @@
     const importBtn = canWrite()
       ? `<button data-act="openNew" style="display:flex; align-items:center; gap:8px; height:40px; padding:0 17px; border-radius:10px; border:none; background:${GR}; color:${ON_GR}; font-weight:700; font-size:13.5px; cursor:pointer; box-shadow:0 4px 14px rgba(${GR_RGB},0.25);"><span style="font-size:17px; line-height:1; margin-top:-1px;">＋</span> Créer un item</button>`
       : '';
+    const missingBtn = canWrite()
+      ? `<button data-act="toggleMissing" style="${missStyle}"><span style="width:7px; height:7px; border-radius:50%; background:${AMBER};"></span> Images manquantes</button>`
+      : '';
     const rightTools = v.showGalleryTab
       ? `<div style="display:flex; align-items:center; gap:16px;">
-          <button data-act="toggleMissing" style="${missStyle}"><span style="width:7px; height:7px; border-radius:50%; background:${AMBER};"></span> Images manquantes</button>
+          ${missingBtn}
           ${importBtn}
         </div>`
       : '';
-    const readonlyBadge = !canWrite()
-      ? `<span style="display:flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;background:rgba(224,161,78,0.13);border:1px solid rgba(224,161,78,0.3);color:${AMBER};font-size:12px;font-weight:600;"><span style="width:6px;height:6px;border-radius:50%;background:${AMBER};"></span> Lecture seule</span>`
-      : '';
     const userChip = s.user
       ? `<div style="display:flex;align-items:center;gap:10px;">
-          ${readonlyBadge}
           <div style="display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border-radius:20px;background:#211d16;border:1px solid rgba(236,231,223,0.08);">
             ${s.user.avatar
               ? `<img src="https://cdn.discordapp.com/avatars/${s.user.id}/${s.user.avatar}.png?size=32" style="width:24px;height:24px;border-radius:50%;display:block;" />`
@@ -426,39 +436,21 @@
     </header>`;
   }
 
-  function statsHTML(v) {
-    var pct = v.total ? ((v.onlineCount / v.total) * 100).toFixed(1) : '0.0';
-    var cards = [
-      { label: 'Items référencés', value: String(v.total), unit: '', sub: 'total en base', color: '#ece7df' },
-      { label: 'Images en ligne', value: String(v.onlineCount), unit: pct + ' %', sub: 'couverture du catalogue', color: GR_LIGHT },
-      { label: 'Images manquantes', value: String(v.missingCount), unit: 'à téléverser', color: v.missingCount > 0 ? AMBER : GR_LIGHT },
-    ];
-    const cells = cards.map((st) => `<div style="background:#1a1712; border:1px solid rgba(236,231,223,0.07); border-radius:13px; padding:16px 18px;">
-        <div style="font-size:12.5px; color:#a89f93; margin-bottom:10px;">${esc(st.label)}</div>
-        <div style="display:flex; align-items:baseline; gap:8px;">
-          <span style="font-size:26px; font-weight:700; letter-spacing:-0.02em; color:${st.color};">${esc(st.value)}</span>
-          <span style="font-size:12px; color:#756c60; font-family:'JetBrains Mono',monospace;">${esc(st.unit)}</span>
-        </div>
-        <div style="font-size:12px; color:#756c60; margin-top:7px;">${esc(st.sub)}</div>
-      </div>`).join('');
-    return `<div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:26px;">${cells}</div>`;
-  }
-
   function toolbarHTML(v) {
-    const s = state;
-    const opt = (val, label) => `<option value="${val}" ${s.sort === val ? 'selected' : ''}>${esc(label)}</option>`;
     return `<div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
       <h2 style="margin:0; font-size:18px; font-weight:700; letter-spacing:-0.01em;">${esc(v.galleryTitle)}</h2>
-      <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#756c60; background:#211d16; border:1px solid rgba(236,231,223,0.07); padding:3px 9px; border-radius:7px;">${v.items.length} résultats</span>
       <div style="flex:1;"></div>
-      <select data-act="sort" style="height:36px; padding:0 30px 0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16 url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2210%22 height=%2210%22><path d=%22M1 3l4 4 4-4%22 stroke=%22%23a89f93%22 stroke-width=%221.5%22 fill=%22none%22/></svg>') no-repeat right 11px center; color:#ece7df; font-size:13px; cursor:pointer; outline:none;">
-        ${opt('recent', 'Récemment modifiés')}${opt('az', 'Nom (A → Z)')}${opt('weight', 'Poids décroissant')}
-      </select>
     </div>`;
   }
 
   function listHTML(v) {
-    const head = `<div style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;"><span>Image</span><span>Item</span><span>Identifiant</span><span>Catégorie</span><span>Type</span><span>Poids</span><span>Statut</span></div>`;
+    const s = state;
+    const sortHead = (col, label) => {
+      const active = s.sortCol === col;
+      const arrow = active ? (s.sortDir === 'desc' ? ' ↓' : ' ↑') : '';
+      return `<span data-act="sortCol" data-col="${col}" style="cursor:pointer; user-select:none; color:${active ? '#ece7df' : '#756c60'};">${esc(label)}${arrow}</span>`;
+    };
+    const head = `<div style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;"><span>Image</span>${sortHead('label', 'Item')}${sortHead('item', 'Identifiant')}${sortHead('cat', 'Catégorie')}${sortHead('type', 'Type')}${sortHead('weight', 'Poids')}${sortHead('status', 'Statut')}</div>`;
     const rows = v.items.map((it) => `<div class="list-row" data-act="openItem" data-id="${it.id}" style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05); cursor:pointer;">
         <div style="${it.thumbStyle}"></div>
         <span style="font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</span>
@@ -652,7 +644,7 @@
 
   function contentHTML(v) {
     if (v.showModuleSoon) return moduleSoonHTML(v);
-    let body = statsHTML(v) + toolbarHTML(v);
+    let body = toolbarHTML(v);
     if (v.isEmpty) body += emptyHTML();
     else if (v.showList) body += listHTML(v);
     return body;
@@ -743,6 +735,13 @@
       case 'cat': state.cat = key; render(); break;
       case 'clearQuery': state.query = ''; render(); break;
       case 'toggleMissing': state.onlyMissing = !state.onlyMissing; render(); break;
+      case 'sortCol': {
+        const col = el.dataset.col;
+        if (state.sortCol === col) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+        else { state.sortCol = col; state.sortDir = 'asc'; }
+        render();
+        break;
+      }
       case 'openNew': openNew(); break;
       case 'openItem': openItem(+el.dataset.id); break;
       case 'closeModal': closeModal(); break;
@@ -786,7 +785,6 @@
     const val = e.target.value;
     if (act === 'pickerQuery') { state.pickerQuery = val; state.pickerVisibleCount = PICKER_CHUNK; render(); }
     else if (act === 'query') { state.query = val; render(); }
-    else if (act === 'sort') { state.sort = val; render(); }
     else if (act === 'setDraft' && state.draft) {
       const update = { [key]: val };
       if (key === 'groupId') update.cat = groupCat(val);
