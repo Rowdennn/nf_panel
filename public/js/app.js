@@ -154,6 +154,20 @@
     render();
   }
   function clearBulkSelection() { state.bulkSelected = new Set(); render(); }
+  function copyBulkIdentifiers() {
+    const ids = [...state.bulkSelected]
+      .map((id) => state.items.find((i) => i.id === id))
+      .filter(Boolean)
+      .map((it) => it.item);
+    if (!ids.length) return;
+    if (!navigator.clipboard || !navigator.clipboard.writeText) {
+      setFlash('Presse-papier non disponible dans ce navigateur.', 'error');
+      return;
+    }
+    navigator.clipboard.writeText(JSON.stringify(ids, null, 2))
+      .then(() => setFlash(`${ids.length} identifiant${ids.length > 1 ? 's' : ''} copié${ids.length > 1 ? 's' : ''}.`, 'success'))
+      .catch(() => setFlash('Échec de la copie.', 'error'));
+  }
   function openBulkEdit() {
     if (!state.bulkSelected.size) return;
     const defaultGroupId = state.groups.length ? state.groups[0].id : 0;
@@ -542,6 +556,7 @@
     return `<div style="position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px; margin-bottom:16px; padding:10px 16px; border-radius:10px; background:#1c1416; box-shadow:0 4px 14px rgba(0,0,0,0.35); border:1px solid rgba(${BX_RGB},0.25);">
       <span style="font-size:13px; color:${BX_LIGHT}; font-weight:600;">${n} sélectionné${n > 1 ? 's' : ''}</span>
       <div style="flex:1;"></div>
+      <button data-act="copyBulkIds" style="height:34px; padding:0 14px; border-radius:8px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:${n ? '#a89f93' : '#5a534a'}; font-weight:600; font-size:12.5px; cursor:${n ? 'pointer' : 'not-allowed'};">Copier dans le presse-papier</button>
       <button data-act="clearBulkSelection" style="height:34px; padding:0 14px; border-radius:8px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:12.5px; cursor:pointer;">Annuler la sélection</button>
       <button data-act="openBulkEdit" style="height:34px; padding:0 16px; border-radius:8px; border:none; background:${n ? BX : '#3a322a'}; color:#fff; font-weight:700; font-size:12.5px; cursor:${n ? 'pointer' : 'not-allowed'}; opacity:${n ? '1' : '0.5'};">Modifier en masse</button>
     </div>`;
@@ -876,6 +891,7 @@
       case 'toggleBulkMode': toggleBulkMode(); break;
       case 'toggleBulkSelect': toggleBulkSelect(+el.dataset.id); break;
       case 'clearBulkSelection': clearBulkSelection(); break;
+      case 'copyBulkIds': copyBulkIdentifiers(); break;
       case 'openBulkEdit': openBulkEdit(); break;
       case 'closeBulkModal': closeBulkModal(); break;
       case 'saveBulk': saveBulk(); break;
