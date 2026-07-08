@@ -86,6 +86,11 @@
     authChecked: false,
     user: null,
     access: null, // 'full' | 'readonly' | null
+
+    bulkMode: false,
+    bulkSelected: new Set(),
+    bulkDraft: null,
+    bulkSaving: false,
   };
   const IS_DEV = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   function canWrite() { return !state.devRoOverride && state.access === 'full'; }
@@ -136,6 +141,58 @@
     render();
   }
   function closeModal() { state.draft = null; render(); }
+
+  function toggleBulkMode() {
+    state.bulkMode = !state.bulkMode;
+    state.bulkSelected = new Set();
+    render();
+  }
+  function toggleBulkSelect(id) {
+    const next = new Set(state.bulkSelected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    state.bulkSelected = next;
+    render();
+  }
+  function clearBulkSelection() { state.bulkSelected = new Set(); render(); }
+  function openBulkEdit() {
+    if (!state.bulkSelected.size) return;
+    const defaultGroupId = state.groups.length ? state.groups[0].id : 0;
+    state.bulkDraft = { groupId: defaultGroupId, limit: 1, weight: 0.5 };
+    render();
+  }
+  function closeBulkModal() { state.bulkDraft = null; render(); }
+  function saveBulk() {
+    const bd = state.bulkDraft;
+    if (!bd || state.bulkSaving) return;
+    const fields = { groupId: Number(bd.groupId), limit: Number(bd.limit), weight: Number(bd.weight) };
+
+    const items = [...state.bulkSelected].map((id) => state.items.find((i) => i.id === id)).filter(Boolean);
+    if (!items.length) { state.bulkDraft = null; render(); return; }
+
+    state.bulkSaving = true;
+    render();
+
+    Promise.all(items.map((it) =>
+      fetch(`/api/items/${encodeURIComponent(it.item)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      })
+        .then((r) => ({ ok: r.ok }))
+        .catch(() => ({ ok: false }))
+    )).then((results) => {
+      const failed = results.filter((r) => !r.ok).length;
+      state.bulkSaving = false;
+      state.bulkDraft = null;
+      state.bulkMode = false;
+      state.bulkSelected = new Set();
+      setFlash(
+        failed ? `${results.length - failed}/${results.length} items modifiés, ${failed} en échec.` : `${results.length} item${results.length > 1 ? 's' : ''} modifié${results.length > 1 ? 's' : ''}.`,
+        failed ? 'warn' : 'success'
+      );
+      loadItems();
+    });
+  }
   function finalizeDraft(d) {
     const items = state.items.slice();
     if (d.id == null) {
@@ -403,9 +460,16 @@
     const missingBtn = canWrite()
       ? `<button data-act="toggleMissing" style="${missStyle}"><span style="width:7px; height:7px; border-radius:50%; background:${AMBER};"></span> Images manquantes</button>`
       : '';
+    const bulkStyle = s.bulkMode
+      ? `display:flex; align-items:center; gap:8px; height:40px; padding:0 14px; border-radius:10px; border:1px solid rgba(${BX_RGB},0.45); background:rgba(${BX_RGB},0.15); color:${BX_LIGHT}; font-weight:600; font-size:13px; cursor:pointer;`
+      : 'display:flex; align-items:center; gap:8px; height:40px; padding:0 14px; border-radius:10px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#a89f93; font-weight:600; font-size:13px; cursor:pointer;';
+    const bulkBtn = canWrite()
+      ? `<button data-act="toggleBulkMode" style="${bulkStyle}"><span style="width:7px; height:7px; border-radius:50%; background:${BX_LIGHT};"></span> Sélection multiple</button>`
+      : '';
     const rightTools = v.showGalleryTab
       ? `<div style="display:flex; align-items:center; gap:16px;">
           ${missingBtn}
+          ${bulkBtn}
           ${importBtn}
         </div>`
       : '';
@@ -445,13 +509,21 @@
 
   function listHTML(v) {
     const s = state;
+    const bulk = s.bulkMode && canWrite();
+    const gridCols = bulk ? '28px 54px 1.4fr 1fr 90px 100px 90px 90px' : '54px 1.4fr 1fr 90px 100px 90px 90px';
     const sortHead = (col, label) => {
       const active = s.sortCol === col;
       const arrow = active ? (s.sortDir === 'desc' ? ' ↓' : ' ↑') : '';
       return `<span data-act="sortCol" data-col="${col}" style="cursor:pointer; user-select:none; color:${active ? '#ece7df' : '#756c60'};">${esc(label)}${arrow}</span>`;
     };
-    const head = `<div style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;"><span>Image</span>${sortHead('label', 'Item')}${sortHead('item', 'Identifiant')}${sortHead('cat', 'Catégorie')}${sortHead('type', 'Type')}${sortHead('weight', 'Poids')}${sortHead('status', 'Statut')}</div>`;
-    const rows = v.items.map((it) => `<div class="list-row" data-act="openItem" data-id="${it.id}" style="display:grid; grid-template-columns:54px 1.4fr 1fr 90px 100px 90px 90px; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05); cursor:pointer;">
+    const head = `<div style="display:grid; grid-template-columns:${gridCols}; gap:12px; align-items:center; padding:11px 16px; background:#1a1712; border-bottom:1px solid rgba(236,231,223,0.08); font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color:#756c60;">${bulk ? '<span></span>' : ''}<span>Image</span>${sortHead('label', 'Item')}${sortHead('item', 'Identifiant')}${sortHead('cat', 'Catégorie')}${sortHead('type', 'Type')}${sortHead('weight', 'Poids')}${sortHead('status', 'Statut')}</div>`;
+    const rows = v.items.map((it) => {
+      const selected = bulk && s.bulkSelected.has(it.id);
+      const checkboxCell = bulk
+        ? `<div style="width:18px;height:18px;border-radius:5px;border:1.5px solid ${selected ? BX_LIGHT : 'rgba(236,231,223,0.25)'};background:${selected ? `rgba(${BX_RGB},0.35)` : 'transparent'};display:flex;align-items:center;justify-content:center;font-size:12px;color:${BX_LIGHT};flex-shrink:0;">${selected ? '✓' : ''}</div>`
+        : '';
+      return `<div class="list-row" data-act="${bulk ? 'toggleBulkSelect' : 'openItem'}" data-id="${it.id}" style="display:grid; grid-template-columns:${gridCols}; gap:12px; align-items:center; padding:9px 16px; border-bottom:1px solid rgba(236,231,223,0.05); cursor:pointer; ${selected ? `background:rgba(${BX_RGB},0.08);` : ''}">
+        ${checkboxCell}
         <div style="${it.thumbStyle}"></div>
         <span style="font-weight:600; font-size:13.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.label)}</span>
         <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#a89f93; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(it.item)}</span>
@@ -459,8 +531,20 @@
         <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#756c60;">${esc(it.type)}</span>
         <span style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#a89f93;">${esc(it.weight)}</span>
         <span style="${it.statusStyle}">${esc(it.statusText)}</span>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     return `<div style="border:1px solid rgba(236,231,223,0.08); border-radius:12px; overflow:hidden;">${head}${rows}</div>`;
+  }
+
+  function bulkBarHTML() {
+    if (!state.bulkMode || !canWrite()) return '';
+    const n = state.bulkSelected.size;
+    return `<div style="position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px; margin-bottom:16px; padding:10px 16px; border-radius:10px; background:#1c1416; box-shadow:0 4px 14px rgba(0,0,0,0.35); border:1px solid rgba(${BX_RGB},0.25);">
+      <span style="font-size:13px; color:${BX_LIGHT}; font-weight:600;">${n} sélectionné${n > 1 ? 's' : ''}</span>
+      <div style="flex:1;"></div>
+      <button data-act="clearBulkSelection" style="height:34px; padding:0 14px; border-radius:8px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:12.5px; cursor:pointer;">Annuler la sélection</button>
+      <button data-act="openBulkEdit" style="height:34px; padding:0 16px; border-radius:8px; border:none; background:${n ? BX : '#3a322a'}; color:#fff; font-weight:700; font-size:12.5px; cursor:${n ? 'pointer' : 'not-allowed'}; opacity:${n ? '1' : '0.5'};">Modifier en masse</button>
+    </div>`;
   }
 
   function emptyHTML() {
@@ -579,6 +663,47 @@
     </div>`;
   }
 
+  function bulkModalHTML(animate) {
+    const bd = state.bulkDraft;
+    if (!bd) return '';
+    const n = state.bulkSelected.size;
+    const groupIdOpts = state.groups.map((g) => `<option value="${g.id}" ${Number(bd.groupId) === Number(g.id) ? 'selected' : ''}>${esc(groupLabel(g))}</option>`).join('');
+
+    const row = (label, inputHtml) => `<div style="padding:10px 0; border-bottom:1px solid rgba(236,231,223,0.06);">
+        <div style="font-size:12.5px; font-weight:600; color:#ece7df; margin-bottom:6px;">${esc(label)}</div>
+        ${inputHtml}
+      </div>`;
+    const fieldStyle = `width:100%; height:38px; padding:0 12px; border-radius:9px; border:1px solid rgba(236,231,223,0.1); background:#211d16; color:#ece7df; font-size:13.5px; font-family:'JetBrains Mono',monospace; outline:none;`;
+
+    const groupIdInput = `<select data-act="setBulkField" data-key="groupId" style="${fieldStyle} cursor:pointer; font-family:inherit;">${groupIdOpts}</select>`;
+    const limitInput = `<input data-act="setBulkField" data-key="limit" type="number" value="${esc(bd.limit)}" style="${fieldStyle}" />`;
+    const weightInput = `<input data-act="setBulkField" data-key="weight" type="number" step="0.01" value="${esc(bd.weight)}" style="${fieldStyle}" />`;
+
+    const sv = state.bulkSaving;
+    const spinner = `<span style="display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spinBtn .7s linear infinite;vertical-align:middle;"></span>`;
+    const backdropAnim = animate ? 'animation:fadeIn .14s ease;' : '';
+    const modalAnim = animate ? 'animation:popIn .2s cubic-bezier(.2,.7,.3,1);' : '';
+
+    return `<div data-act="closeBulkModal" style="position:fixed; inset:0; background:rgba(8,6,4,0.66); backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; padding:32px; z-index:50; ${backdropAnim}">
+      <div data-act="stop" style="width:100%; max-width:440px; background:#1a1712; border:1px solid rgba(236,231,223,0.1); border-radius:16px; overflow:hidden; box-shadow:0 30px 80px rgba(0,0,0,0.6); ${modalAnim}">
+        <div style="padding:18px 22px; border-bottom:1px solid rgba(236,231,223,0.08);">
+          <div style="font-size:11px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:${BX_LIGHT};">Modification en masse</div>
+          <div style="font-size:16px; font-weight:700; margin-top:2px;">${n} item${n > 1 ? 's' : ''} sélectionné${n > 1 ? 's' : ''}</div>
+        </div>
+        <div style="padding:2px 22px 4px;">
+          ${row('Catégorie', groupIdInput)}
+          ${row('Limite (stack)', limitInput)}
+          ${row('Poids (weight)', weightInput)}
+        </div>
+        <div style="display:flex; align-items:center; gap:12px; padding:16px 22px; border-top:1px solid rgba(236,231,223,0.08); background:#16130f;">
+          <div style="flex:1;"></div>
+          <button data-act="closeBulkModal" style="height:38px; padding:0 16px; border-radius:9px; border:1px solid rgba(236,231,223,0.12); background:transparent; color:#a89f93; font-weight:600; font-size:13px; cursor:pointer;">Annuler</button>
+          <button data-act="saveBulk" style="height:38px; padding:0 18px; border-radius:9px; border:none; background:${BX}; color:#fff; font-weight:700; font-size:13px; cursor:${sv ? 'not-allowed' : 'pointer'}; opacity:${sv ? '0.75' : '1'}; display:inline-flex; align-items:center; gap:8px;">${sv ? spinner : ''}${sv ? 'Application…' : `Appliquer à ${n}`}</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   function pickerModalHTML(animate) {
     if (!state.pickerOpen || !state.draft) return '';
     const allFiles = computeVals().pickerFiles;
@@ -644,7 +769,7 @@
 
   function contentHTML(v) {
     if (v.showModuleSoon) return moduleSoonHTML(v);
-    let body = toolbarHTML(v);
+    let body = toolbarHTML(v) + bulkBarHTML();
     if (v.isEmpty) body += emptyHTML();
     else if (v.showList) body += listHTML(v);
     return body;
@@ -652,6 +777,7 @@
 
   let _modalWasOpen = false;
   let _pickerWasOpen = false;
+  let _bulkModalWasOpen = false;
 
   // Rendu + restauration du focus
   function captureFocus() {
@@ -696,6 +822,8 @@
     _modalWasOpen = !!state.draft;
     const pickerJustOpened = state.pickerOpen && !_pickerWasOpen;
     _pickerWasOpen = state.pickerOpen;
+    const bulkModalJustOpened = !!state.bulkDraft && !_bulkModalWasOpen;
+    _bulkModalWasOpen = !!state.bulkDraft;
     const f = state.flash;
     const toastBg   = f && f.type === 'error' ? '#c0392b' : f && f.type === 'warn' ? '#b8860b' : GR;
     const toastText = f && f.type === 'error' ? '#fff'    : f && f.type === 'warn' ? '#fff'    : ON_GR;
@@ -707,7 +835,7 @@
           ${headerHTML(v)}
           <div data-scroll style="flex:1; overflow-y:auto; padding:24px 24px 48px;">${contentHTML(v)}</div>
         </main>
-      </div>${modalHTML(modalJustOpened)}${pickerModalHTML(pickerJustOpened)}${toastHTML}`;
+      </div>${modalHTML(modalJustOpened)}${pickerModalHTML(pickerJustOpened)}${bulkModalHTML(bulkModalJustOpened)}${toastHTML}`;
     restoreFocus(cap);
     const newScrollEl = root.querySelector('[data-scroll]');
     if (newScrollEl && scrollTop) newScrollEl.scrollTop = scrollTop;
@@ -718,7 +846,7 @@
   // Dispatch des événements
   function actEl(target) { return target.closest('[data-act]'); }
 
-  const WRITE_ACTIONS = new Set(['openNew', 'saveDraft', 'triggerDrop', 'togDraft', 'openPicker', 'confirmPicker']);
+  const WRITE_ACTIONS = new Set(['openNew', 'saveDraft', 'triggerDrop', 'togDraft', 'openPicker', 'confirmPicker', 'toggleBulkMode', 'toggleBulkSelect', 'clearBulkSelection', 'openBulkEdit', 'saveBulk']);
 
   root.addEventListener('click', (e) => {
     const el = actEl(e.target);
@@ -745,6 +873,12 @@
       case 'openNew': openNew(); break;
       case 'openItem': openItem(+el.dataset.id); break;
       case 'closeModal': closeModal(); break;
+      case 'toggleBulkMode': toggleBulkMode(); break;
+      case 'toggleBulkSelect': toggleBulkSelect(+el.dataset.id); break;
+      case 'clearBulkSelection': clearBulkSelection(); break;
+      case 'openBulkEdit': openBulkEdit(); break;
+      case 'closeBulkModal': closeBulkModal(); break;
+      case 'saveBulk': saveBulk(); break;
       case 'stop': e.stopPropagation(); break;
       case 'saveDraft': saveDraft(); break;
       case 'triggerDrop': {
@@ -785,6 +919,9 @@
     const val = e.target.value;
     if (act === 'pickerQuery') { state.pickerQuery = val; state.pickerVisibleCount = PICKER_CHUNK; render(); }
     else if (act === 'query') { state.query = val; render(); }
+    else if (act === 'setBulkField' && state.bulkDraft && canWrite()) {
+      state.bulkDraft = Object.assign({}, state.bulkDraft, { [key]: val });
+    }
     else if (act === 'setDraft' && state.draft) {
       const update = { [key]: val };
       if (key === 'groupId') update.cat = groupCat(val);
